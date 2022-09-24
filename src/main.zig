@@ -50,10 +50,6 @@ pub fn main() !void {
         .fail = Fail.Compile,
         .exec_res = undefined,
     };
-
-    var file: ?std.fs.File = try std.fs.cwd().openFile(args[1], .{});
-    defer if (file) |f| f.close();
-
     // 1. capture output: Due to --test-no-exec we dont need seperation between
     // compiling and running. However, this may change on more complex build steps.
 
@@ -63,11 +59,12 @@ pub fn main() !void {
         .allocator = arena,
         .argv = &[_][]const u8{ "zig", "test", "--test-no-exec", config.in_path },
     });
-    if (exp_res_comp.term.Exited == 0) {
+    if (exp_res_comp.term.Exited != 0) {
         in_behave.fail = Fail.Compile;
         in_behave.exec_res = exp_res_comp;
 
-        // MAIN LOGIC
+        try mainLogic(&config, &in_behave);
+        std.process.exit(0);
     }
 
     //try std_out.writer().print("term : {}\nstdout: {s}\nstderr: {s}\n", .{ exp_res.term, exp_res.stdout, exp_res.stderr });
@@ -79,8 +76,44 @@ pub fn main() !void {
     in_behave.fail = Fail.Run;
     in_behave.exec_res = exp_res_run;
 
-    // MAIN LOGIC
-    // test block reduction
+    try mainLogic(&config, &in_behave);
+    std.process.exit(0);
+}
+
+pub fn fatal(comptime format: []const u8, args: anytype) noreturn {
+    std.log.err(format, args);
+    std.process.exit(1);
+}
+
+// caller owns memery of Ast
+fn parseFile(alloc: std.mem.Allocator, in_file: []const u8) !std.zig.Ast {
+    var f = std.fs.cwd().openFile(in_file, .{}) catch |err| {
+        fatal("unable to open file for zig-reduce '{s}': {s}", .{ in_file, @errorName(err) });
+    };
+    defer f.close();
+    const stat = try f.stat();
+    if (stat.size > std.math.maxInt(u32))
+        return error.FileTooBig;
+    const source = try alloc.allocSentinel(u8, @intCast(usize, stat.size), 0);
+    defer alloc.free(source);
+    const amt = try f.readAll(source);
+    if (amt <= 1)
+        return error.EmptyFile;
+    if (amt != stat.size)
+        return error.UnexpectedEndOfFile;
+    var tree = try std.zig.parse(alloc, source);
+    return tree;
+}
+
+fn mainLogic(config: *Config, in_beh: *InBehave) !void {
+    var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(!general_purpose_allocator.deinit());
+    const gpa = general_purpose_allocator.allocator();
+
+    var tree = try parseFile(gpa, config.in_path); // input file assumed to be valid Zig
+    defer tree.deinit(gpa);
+    std.debug.assert(in_beh.fail == Fail.Run);
+    // 1. test block reduction
 
 }
 
