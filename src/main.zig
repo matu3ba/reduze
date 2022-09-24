@@ -128,29 +128,40 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
     const members = parsed.tree.rootDecls(); // Ast.Node.Index
     std.debug.assert(members.len > 0);
     for (members) |member| {
-        const main_tokens = parsed.tree.nodes.items(.main_token);
+        // const main_tokens = parsed.tree.nodes.items(.main_token);
         const datas = parsed.tree.nodes.items(.data);
         const node_tags = parsed.tree.nodes.items(.tag);
         const decl = member;
         switch (parsed.tree.nodes.items(.tag)[decl]) {
             .test_decl => {
-                const test_token = main_tokens[decl];
-                const src_loc = parsed.tree.tokenLocation(0, test_token);
+                // const test_token = main_tokens[decl];
+                // const src_loc = parsed.tree.tokenLocation(0, test_token);
                 // test "text" or test func_decl
-                std.debug.print("src_loc. line: {d}, col: {d}\n", .{ src_loc.line, src_loc.column });
-                std.debug.print("src_loc. line_start: {d}, line_end: {d}\n", .{ src_loc.line_start, src_loc.line_end });
+                // std.debug.print("src_loc. line: {d}, col: {d}\n", .{ src_loc.line, src_loc.column });
+                // std.debug.print("src_loc. line_start: {d}, line_end: {d}\n", .{ src_loc.line_start, src_loc.line_end });
+                //try stdout.writer().writeAll("---- test \"text\" or test func_decl with lbracket\n");
+                // try stdout.writer().writeAll(parsed.source[src_loc.line_start..src_loc.line_end]);
+                // try stdout.writer().writeAll("\n");
                 // {} brackets + ;-separated statements inside
                 const node = datas[decl].rhs; // std.Ast.Node.Index
                 std.debug.assert(node_tags[node] == .block_two_semicolon);
                 const block_node = node;
                 const lbrace = parsed.tree.nodes.items(.main_token)[block_node];
                 const lbrace_srcloc = parsed.tree.tokenLocation(0, lbrace);
-                std.debug.print("lbrace_srcloc. line: {d}, col: {d}\n", .{ lbrace_srcloc.line, lbrace_srcloc.column });
-                std.debug.print("lbrace_srcloc. line_start: {d}, line_end: {d}\n", .{ lbrace_srcloc.line_start, lbrace_srcloc.line_end });
+                //try stdout.writer().writeAll("{} brackets\n");
+                //std.debug.print("lbrace_srcloc. line: {d}, col: {d}\n", .{ lbrace_srcloc.line, lbrace_srcloc.column });
+                // std.debug.print("lbrace_srcloc. line_start: {d}, line_end: {d}\n", .{ lbrace_srcloc.line_start, lbrace_srcloc.line_end });
+                // try stdout.writer().writeAll(parsed.source[lbrace_srcloc.line_start..lbrace_srcloc.line_end]);
+                // try stdout.writer().writeAll("\n");
                 const rbrace = parsed.tree.lastToken(block_node);
                 const rbrace_srcloc = parsed.tree.tokenLocation(0, rbrace);
-                std.debug.print("rbrace_srcloc. line: {d}, col: {d}\n", .{ rbrace_srcloc.line, rbrace_srcloc.column });
-                std.debug.print("rbrace_srcloc. line_start: {d}, line_end: {d}\n", .{ rbrace_srcloc.line_start, rbrace_srcloc.line_end });
+                //std.debug.print("rbrace_srcloc. line: {d}, col: {d}\n", .{ rbrace_srcloc.line, rbrace_srcloc.column });
+                // std.debug.print("rbrace_srcloc. line_start: {d}, line_end: {d}\n", .{ rbrace_srcloc.line_start, rbrace_srcloc.line_end });
+                // try stdout.writer().writeAll(parsed.source[rbrace_srcloc.line_start..rbrace_srcloc.line_end]);
+                // try stdout.writer().writeAll("\n");
+
+                try stdout.writeAll(parsed.source[lbrace_srcloc.line_start..rbrace_srcloc.line_end]);
+                try stdout.writer().writeAll("\n");
             },
             else => {},
         }
