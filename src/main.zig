@@ -85,8 +85,13 @@ pub fn fatal(comptime format: []const u8, args: anytype) noreturn {
     std.process.exit(1);
 }
 
+const Parsed = struct {
+    source: [:0]u8,
+    tree: std.zig.Ast,
+};
+
 // caller owns memery of Ast
-fn parseFile(alloc: std.mem.Allocator, in_file: []const u8) !std.zig.Ast {
+fn openAndParseFile(alloc: std.mem.Allocator, in_file: []const u8) !Parsed {
     var f = std.fs.cwd().openFile(in_file, .{}) catch |err| {
         fatal("unable to open file for zig-reduce '{s}': {s}", .{ in_file, @errorName(err) });
     };
@@ -95,14 +100,17 @@ fn parseFile(alloc: std.mem.Allocator, in_file: []const u8) !std.zig.Ast {
     if (stat.size > std.math.maxInt(u32))
         return error.FileTooBig;
     const source = try alloc.allocSentinel(u8, @intCast(usize, stat.size), 0);
-    defer alloc.free(source);
+    errdefer alloc.free(source);
     const amt = try f.readAll(source);
     if (amt <= 1)
         return error.EmptyFile;
     if (amt != stat.size)
         return error.UnexpectedEndOfFile;
     var tree = try std.zig.parse(alloc, source);
-    return tree;
+    return Parsed{
+        .source = source,
+        .tree = tree,
+    };
 }
 
 fn mainLogic(config: *Config, in_beh: *InBehave) !void {
@@ -110,11 +118,56 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
     defer std.debug.assert(!general_purpose_allocator.deinit());
     const gpa = general_purpose_allocator.allocator();
 
-    var tree = try parseFile(gpa, config.in_path); // input file assumed to be valid Zig
-    defer tree.deinit(gpa);
+    var parsed = try openAndParseFile(gpa, config.in_path); // input file assumed to be valid Zig
+    defer gpa.free(parsed.source);
+    defer parsed.tree.deinit(gpa);
+
     std.debug.assert(in_beh.fail == Fail.Run);
     // 1. test block reduction
 
+    const members = parsed.tree.rootDecls(); // Ast.Node.Index
+    std.debug.assert(members.len > 0);
+    for (members) |member| {
+        const main_tokens = parsed.tree.nodes.items(.main_token);
+        //const main_tokens = tree.nodes.items(.main_token);
+        const decl = member;
+        std.debug.print("member ", .{});
+        switch (parsed.tree.nodes.items(.tag)[decl]) {
+            .test_decl => {
+                const test_token = main_tokens[decl];
+                std.debug.print("is test decl\n", .{});
+                const src_loc = parsed.tree.tokenLocation(0, test_token);
+                std.debug.print("src_loc. line: {d}, col: {d}\n", .{ src_loc.line, src_loc.column });
+                std.debug.print("src_loc. line_start: {d}, line_end: {d}\n", .{ src_loc.line_start, src_loc.line_end });
+            },
+            else => {
+                std.debug.print("is no test decl\n", .{});
+            },
+        }
+        // const decl = i_member;
+        //const tmp = tree.getNodeSource(i_
+        // const token_tags = tree.tokens.items(.tag);
+        // const main_tokens = tree.nodes.items(.main_token);
+        // const datas = tree.nodes.items(.data);
+        // //const node_content = tree.getNodeSource(member);
+        // //std.debug.print("content node{d}: {s}\n", .{ i, node_content });
+        //
+        // // for now we are only interested in the test blocks
+        // switch (tree.nodes.items(.tag)[member]) {
+        //     .test_decl => {
+        //         std.debug.print("member {d} is test decl\n", .{member});
+        //
+        //         // const test_token = main_tokens[decl];
+        //         // try renderToken(ais, tree, test_token, .space);
+        //         // const test_name_tag = token_tags[test_token + 1];
+        //         // if (test_name_tag == .string_literal or test_name_tag == .identifier) {
+        //         //     try renderToken(ais, tree, test_token + 1, .space);
+        //         // }
+        //         // try renderExpression(gpa, ais, tree, datas[decl].rhs, space);
+        //     },
+        // }
+    }
+    // queue to iterate through all member of rootDecls
 }
 
 // void llvm::runDeltaPasses(TestRunner &Tester, int MaxPassIterations) {
