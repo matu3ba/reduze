@@ -129,43 +129,31 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
     std.debug.assert(members.len > 0);
     for (members) |member| {
         const main_tokens = parsed.tree.nodes.items(.main_token);
-        //const main_tokens = tree.nodes.items(.main_token);
+        const datas = parsed.tree.nodes.items(.data);
+        const node_tags = parsed.tree.nodes.items(.tag);
         const decl = member;
-        std.debug.print("member ", .{});
         switch (parsed.tree.nodes.items(.tag)[decl]) {
             .test_decl => {
                 const test_token = main_tokens[decl];
-                std.debug.print("is test decl\n", .{});
                 const src_loc = parsed.tree.tokenLocation(0, test_token);
+                // test "text" or test func_decl
                 std.debug.print("src_loc. line: {d}, col: {d}\n", .{ src_loc.line, src_loc.column });
                 std.debug.print("src_loc. line_start: {d}, line_end: {d}\n", .{ src_loc.line_start, src_loc.line_end });
+                // {} brackets + ;-separated statements inside
+                const node = datas[decl].rhs; // std.Ast.Node.Index
+                std.debug.assert(node_tags[node] == .block_two_semicolon);
+                const block_node = node;
+                const lbrace = parsed.tree.nodes.items(.main_token)[block_node];
+                const lbrace_srcloc = parsed.tree.tokenLocation(0, lbrace);
+                std.debug.print("lbrace_srcloc. line: {d}, col: {d}\n", .{ lbrace_srcloc.line, lbrace_srcloc.column });
+                std.debug.print("lbrace_srcloc. line_start: {d}, line_end: {d}\n", .{ lbrace_srcloc.line_start, lbrace_srcloc.line_end });
+                const rbrace = parsed.tree.lastToken(block_node);
+                const rbrace_srcloc = parsed.tree.tokenLocation(0, rbrace);
+                std.debug.print("rbrace_srcloc. line: {d}, col: {d}\n", .{ rbrace_srcloc.line, rbrace_srcloc.column });
+                std.debug.print("rbrace_srcloc. line_start: {d}, line_end: {d}\n", .{ rbrace_srcloc.line_start, rbrace_srcloc.line_end });
             },
-            else => {
-                std.debug.print("is no test decl\n", .{});
-            },
+            else => {},
         }
-        // const decl = i_member;
-        //const tmp = tree.getNodeSource(i_
-        // const token_tags = tree.tokens.items(.tag);
-        // const main_tokens = tree.nodes.items(.main_token);
-        // const datas = tree.nodes.items(.data);
-        // //const node_content = tree.getNodeSource(member);
-        // //std.debug.print("content node{d}: {s}\n", .{ i, node_content });
-        //
-        // // for now we are only interested in the test blocks
-        // switch (tree.nodes.items(.tag)[member]) {
-        //     .test_decl => {
-        //         std.debug.print("member {d} is test decl\n", .{member});
-        //
-        //         // const test_token = main_tokens[decl];
-        //         // try renderToken(ais, tree, test_token, .space);
-        //         // const test_name_tag = token_tags[test_token + 1];
-        //         // if (test_name_tag == .string_literal or test_name_tag == .identifier) {
-        //         //     try renderToken(ais, tree, test_token + 1, .space);
-        //         // }
-        //         // try renderExpression(gpa, ais, tree, datas[decl].rhs, space);
-        //     },
-        // }
     }
     // queue to iterate through all member of rootDecls
 }
