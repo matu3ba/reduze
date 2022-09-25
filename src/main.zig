@@ -123,7 +123,13 @@ const TokenRange = struct {
 /// Removes block by block and returns the resulting program string
 /// astrict monotonic, assume: tests have no side effects
 /// Caller owns returned memory
-fn testBlockReduction(alloc: std.mem.Allocator, parsed: *Parsed, config: *Config) ![]u8 {
+fn testBlockReduction(
+    alloc: std.mem.Allocator,
+    parsed: *Parsed,
+    config: *Config,
+    in_behave: *InBehave,
+) ![]u8 {
+    std.debug.assert(in_behave.fail == Fail.Run);
     // idea: skip removal of test block, if error can not be reproduced
     var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_instance.deinit();
@@ -164,8 +170,8 @@ fn testBlockReduction(alloc: std.mem.Allocator, parsed: *Parsed, config: *Config
                     .used = true,
                 });
 
-                try stdout.writeAll(parsed.source[lbrace_srcloc.line_start..rbrace_srcloc.line_end]);
-                try stdout.writer().writeAll("\n");
+                // try stdout.writeAll(parsed.source[lbrace_srcloc.line_start..rbrace_srcloc.line_end]);
+                // try stdout.writer().writeAll("\n");
             },
             else => {},
         }
@@ -187,13 +193,50 @@ fn testBlockReduction(alloc: std.mem.Allocator, parsed: *Parsed, config: *Config
         std.mem.copy(u8, filepathbuf[pathprefix.len..], config.in_path);
         const filename = try std.fmt.bufPrint(filepathbuf[len_prefix0path..], "{d}", .{i});
         const len_prefixpath = len_prefix0path + filename.len;
-
-        var file = try std.fs.cwd().createFile(filepathbuf[0..len_prefixpath], .{});
-        defer file.close();
+        const filepath = filepathbuf[0..len_prefixpath];
+        {
+            var file = try std.fs.cwd().createFile(filepath, .{});
+            defer file.close();
+            try file.writeAll(parsed.source[0..skiplist.items[i].start]);
+            try file.writeAll(parsed.source[skiplist.items[i].end..]);
+        }
+        {
+            const res_run = try std.ChildProcess.exec(.{
+                .allocator = arena,
+                .argv = &[_][]const u8{ "zig", "test", filepath },
+            });
+            if (in_behave.exec_res.term.Exited == res_run.term.Exited)
+                skiplist.items[i].used = false;
+            // This could also compare the output etc, but keep it simple
+        }
     }
 
-    var redtest = try alloc.alignedAlloc(u8, @alignOf([]u8), 20);
-    std.mem.copy(u8, redtest, "test123\ntest123");
+    // track from where we last printed to get needed capacity
+    // s_p        s_p
+    //        |   |       xxxxxxx
+    // -------    --------       -------
+    var start_print: usize = 0;
+    var total_len: usize = 0;
+    for (skiplist.items) |skipentry| {
+        if (skipentry.used == false) {
+            total_len += skipentry.start - start_print;
+            start_print = skipentry.end;
+        }
+    }
+    if (start_print != parsed.source.len) {
+        total_len += parsed.source.len - start_print;
+    }
+    var redtest = try alloc.alignedAlloc(u8, @alignOf([]u8), total_len);
+    start_print = 0;
+    for (skiplist.items) |skipentry| {
+        if (skipentry.used == false) {
+            std.mem.copy(u8, redtest, parsed.source[start_print..skipentry.start]);
+            start_print = skipentry.end;
+        }
+    }
+    if (start_print != parsed.source.len) {
+        std.mem.copy(u8, redtest, parsed.source[start_print..]);
+    }
     return redtest;
 }
 
@@ -207,7 +250,7 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
     defer gpa.free(parsed.source);
     defer parsed.tree.deinit(gpa);
 
-    var testred = try testBlockReduction(gpa, &parsed, config);
+    var testred = try testBlockReduction(gpa, &parsed, config, in_beh);
     defer gpa.free(testred);
 
     std.debug.assert(in_beh.fail == Fail.Run);
@@ -241,11 +284,4 @@ fn qualityEstimation() void {}
 fn runDeltaPasses() void {
     // based on MaxPassIterations
 
-}
-
-test "simple test" {
-    var list = std.ArrayList(i32).init(std.testing.allocator);
-    defer list.deinit(); // try commenting this out and see if zig detects the memory leak!
-    try list.append(42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
 }
