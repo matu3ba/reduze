@@ -128,7 +128,7 @@ fn testBlockReduction(
     parsed: *Parsed,
     config: *Config,
     in_behave: *InBehave,
-) ![]u8 {
+) ![:0]u8 {
     std.debug.assert(in_behave.fail == Fail.Run);
     // idea: skip removal of test block, if error can not be reproduced
     var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -228,7 +228,7 @@ fn testBlockReduction(
     if (src_start != parsed.source.len) {
         total_len += parsed.source.len - src_start;
     }
-    var redtest = try alloc.alignedAlloc(u8, @alignOf([]u8), total_len);
+    var redtest: [:0]u8 = try alloc.allocSentinel(u8, total_len, 0);
     src_start = 0;
     var dest_start: usize = 0;
     for (skiplist.items) |skipentry| {
@@ -260,17 +260,16 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
     defer gpa.free(testred);
 
     var tree = std.zig.parse(gpa, testred) catch |err| {
-        stdout.print("--------INITIAL REDUCTION--------\n{s}---------------------------------\n", .{testred}) catch {};
+        stdout.writer().print("--------INITIAL REDUCTION--------\n{s}---------------------------------\n", .{testred}) catch {};
         fatal("error parsing reduced test: {}", .{err});
     };
     defer tree.deinit(gpa);
-    //std.log.debug("{s}\n", .{testred});
 
     const formatted = try tree.render(gpa);
     defer gpa.free(formatted);
 
     try stdout.writeAll("--------INITIAL REDUCTION--------\n");
-    try stdout.writeAll(testred);
+    try stdout.writeAll(formatted);
     try stdout.writeAll("---------------------------------\n");
 
     std.debug.assert(in_beh.fail == Fail.Run);
