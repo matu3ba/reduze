@@ -54,7 +54,8 @@ pub fn main() !void {
     // compiling and running. However, this may change on more complex build steps.
 
     // TODO fix https://github.com/ziglang/zig/issues/7441
-    // for not spamming the ramdisk with stuff
+    // for not spamming the ramdisk with useless stuff
+    // related: How to compile from string without cache?
     const exp_res_comp = try std.ChildProcess.exec(.{
         .allocator = arena,
         .argv = &[_][]const u8{ "zig", "test", "--test-no-exec", config.in_path },
@@ -113,20 +114,35 @@ fn openAndParseFile(alloc: std.mem.Allocator, in_file: []const u8) !Parsed {
     };
 }
 
-fn mainLogic(config: *Config, in_beh: *InBehave) !void {
-    var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
-    defer std.debug.assert(!general_purpose_allocator.deinit());
-    const gpa = general_purpose_allocator.allocator();
+const TokenRange = struct {
+    start: usize,
+    end: usize,
+    used: bool,
+};
 
-    var parsed = try openAndParseFile(gpa, config.in_path); // input file assumed to be valid Zig
-    defer gpa.free(parsed.source);
-    defer parsed.tree.deinit(gpa);
-
-    std.debug.assert(in_beh.fail == Fail.Run);
-    // 1. test block reduction
+/// Removes block by block and returns the resulting program string
+/// astrict monotonic, assume: tests have no side effects
+/// Caller owns returned memory
+fn testBlockReduction(alloc: std.mem.Allocator, parsed: *Parsed) ![]u8 {
+    // idea: skip removal of test block, if error can not be reproduced
+    var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
 
     const members = parsed.tree.rootDecls(); // Ast.Node.Index
     std.debug.assert(members.len > 0);
+    var cnt_roottest: u32 = 0;
+    for (members) |member| {
+        const decl = member;
+        switch (parsed.tree.nodes.items(.tag)[decl]) {
+            .test_decl => {
+                cnt_roottest += 1;
+            },
+            else => {},
+        }
+    }
+    var skiplist = try std.ArrayList(TokenRange).initCapacity(arena, cnt_roottest);
+    defer skiplist.deinit();
     for (members) |member| {
         // const main_tokens = parsed.tree.nodes.items(.main_token);
         const datas = parsed.tree.nodes.items(.data);
@@ -134,31 +150,19 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
         const decl = member;
         switch (parsed.tree.nodes.items(.tag)[decl]) {
             .test_decl => {
-                // const test_token = main_tokens[decl];
-                // const src_loc = parsed.tree.tokenLocation(0, test_token);
-                // test "text" or test func_decl
-                // std.debug.print("src_loc. line: {d}, col: {d}\n", .{ src_loc.line, src_loc.column });
-                // std.debug.print("src_loc. line_start: {d}, line_end: {d}\n", .{ src_loc.line_start, src_loc.line_end });
-                //try stdout.writer().writeAll("---- test \"text\" or test func_decl with lbracket\n");
-                // try stdout.writer().writeAll(parsed.source[src_loc.line_start..src_loc.line_end]);
-                // try stdout.writer().writeAll("\n");
-                // {} brackets + ;-separated statements inside
                 const node = datas[decl].rhs; // std.Ast.Node.Index
                 std.debug.assert(node_tags[node] == .block_two_semicolon);
                 const block_node = node;
                 const lbrace = parsed.tree.nodes.items(.main_token)[block_node];
                 const lbrace_srcloc = parsed.tree.tokenLocation(0, lbrace);
-                //try stdout.writer().writeAll("{} brackets\n");
-                //std.debug.print("lbrace_srcloc. line: {d}, col: {d}\n", .{ lbrace_srcloc.line, lbrace_srcloc.column });
-                // std.debug.print("lbrace_srcloc. line_start: {d}, line_end: {d}\n", .{ lbrace_srcloc.line_start, lbrace_srcloc.line_end });
-                // try stdout.writer().writeAll(parsed.source[lbrace_srcloc.line_start..lbrace_srcloc.line_end]);
-                // try stdout.writer().writeAll("\n");
                 const rbrace = parsed.tree.lastToken(block_node);
                 const rbrace_srcloc = parsed.tree.tokenLocation(0, rbrace);
-                //std.debug.print("rbrace_srcloc. line: {d}, col: {d}\n", .{ rbrace_srcloc.line, rbrace_srcloc.column });
-                // std.debug.print("rbrace_srcloc. line_start: {d}, line_end: {d}\n", .{ rbrace_srcloc.line_start, rbrace_srcloc.line_end });
-                // try stdout.writer().writeAll(parsed.source[rbrace_srcloc.line_start..rbrace_srcloc.line_end]);
-                // try stdout.writer().writeAll("\n");
+
+                skiplist.appendAssumeCapacity(TokenRange{
+                    .start = lbrace_srcloc.line_start,
+                    .end = rbrace_srcloc.line_end,
+                    .used = true,
+                });
 
                 try stdout.writeAll(parsed.source[lbrace_srcloc.line_start..rbrace_srcloc.line_end]);
                 try stdout.writer().writeAll("\n");
@@ -166,6 +170,27 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
             else => {},
         }
     }
+    std.debug.assert(cnt_roottest == skiplist.items.len);
+    var redtest = try alloc.alignedAlloc(u8, @alignOf([]u8), 20);
+    std.mem.copy(u8, redtest, "test123\ntest123");
+    return redtest;
+}
+
+fn mainLogic(config: *Config, in_beh: *InBehave) !void {
+    var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(!general_purpose_allocator.deinit());
+    const gpa = general_purpose_allocator.allocator();
+
+    // input file assumed to be valid Zig
+    var parsed = try openAndParseFile(gpa, config.in_path);
+    defer gpa.free(parsed.source);
+    defer parsed.tree.deinit(gpa);
+
+    var testred = try testBlockReduction(gpa, &parsed);
+    defer gpa.free(testred);
+
+    std.debug.assert(in_beh.fail == Fail.Run);
+    // 1. test block reduction
     // queue to iterate through all member of rootDecls
 }
 
@@ -195,14 +220,6 @@ fn qualityEstimation() void {}
 fn runDeltaPasses() void {
     // based on MaxPassIterations
 
-}
-
-/// Removes block by block: strict monotonic
-/// assume: tests have no side effects
-/// uses skip list internally: skip removal of test block, if error can not be
-/// reproduced
-fn testBlockReduction() void {
-    // TODO: get start and end location of test block
 }
 
 test "simple test" {
