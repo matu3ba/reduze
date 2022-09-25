@@ -123,7 +123,7 @@ const TokenRange = struct {
 /// Removes block by block and returns the resulting program string
 /// astrict monotonic, assume: tests have no side effects
 /// Caller owns returned memory
-fn testBlockReduction(alloc: std.mem.Allocator, parsed: *Parsed) ![]u8 {
+fn testBlockReduction(alloc: std.mem.Allocator, parsed: *Parsed, config: *Config) ![]u8 {
     // idea: skip removal of test block, if error can not be reproduced
     var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_instance.deinit();
@@ -171,6 +171,27 @@ fn testBlockReduction(alloc: std.mem.Allocator, parsed: *Parsed) ![]u8 {
         }
     }
     std.debug.assert(cnt_roottest == skiplist.items.len);
+
+    // write to new tmp/ file and compile+run to compare if error reproduces
+    std.fs.cwd().makeDir("tmp") catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    const pathprefix = "tmp/";
+    var filepathbuf: [100]u8 = undefined;
+    var i: u8 = 0;
+    while (i < cnt_roottest) : (i += 1) {
+        std.mem.copy(u8, filepathbuf[0..], pathprefix[0..]);
+        const len_prefix0path = pathprefix.len + config.in_path.len;
+        std.debug.assert(pathprefix.len + config.in_path.len < filepathbuf.len);
+        std.mem.copy(u8, filepathbuf[pathprefix.len..], config.in_path);
+        const filename = try std.fmt.bufPrint(filepathbuf[len_prefix0path..], "{d}", .{i});
+        const len_prefixpath = len_prefix0path + filename.len;
+
+        var file = try std.fs.cwd().createFile(filepathbuf[0..len_prefixpath], .{});
+        defer file.close();
+    }
+
     var redtest = try alloc.alignedAlloc(u8, @alignOf([]u8), 20);
     std.mem.copy(u8, redtest, "test123\ntest123");
     return redtest;
@@ -186,7 +207,7 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
     defer gpa.free(parsed.source);
     defer parsed.tree.deinit(gpa);
 
-    var testred = try testBlockReduction(gpa, &parsed);
+    var testred = try testBlockReduction(gpa, &parsed, config);
     defer gpa.free(testred);
 
     std.debug.assert(in_beh.fail == Fail.Run);
