@@ -188,12 +188,12 @@ fn testBlockReduction(
     var i: u8 = 0;
     while (i < cnt_roottest) : (i += 1) {
         std.mem.copy(u8, filepathbuf[0..], pathprefix[0..]);
-        const len_prefix0path = pathprefix.len + config.in_path.len;
-        std.debug.assert(pathprefix.len + config.in_path.len < filepathbuf.len);
-        std.mem.copy(u8, filepathbuf[pathprefix.len..], config.in_path);
-        const filename = try std.fmt.bufPrint(filepathbuf[len_prefix0path..], "{d}", .{i});
-        const len_prefixpath = len_prefix0path + filename.len;
-        const filepath = filepathbuf[0..len_prefixpath];
+        const pathprefnr = try std.fmt.bufPrint(filepathbuf[pathprefix.len..], "{d}", .{i});
+        const len_prefix0path = pathprefix.len + pathprefnr.len;
+        std.debug.assert(len_prefix0path < filepathbuf.len);
+        std.mem.copy(u8, filepathbuf[len_prefix0path..], config.in_path);
+        const len_filepath = len_prefix0path + config.in_path.len;
+        const filepath = filepathbuf[0..len_filepath];
         {
             var file = try std.fs.cwd().createFile(filepath, .{});
             defer file.close();
@@ -205,38 +205,44 @@ fn testBlockReduction(
                 .allocator = arena,
                 .argv = &[_][]const u8{ "zig", "test", filepath },
             });
+            // std.log.debug("filepath: {s}, in term exit: {d}, res term exit: {d}\n", .{ filepath, in_behave.exec_res.term.Exited, res_run.term.Exited });
             if (in_behave.exec_res.term.Exited == res_run.term.Exited)
                 skiplist.items[i].used = false;
             // This could also compare the output etc, but keep it simple
         }
     }
 
-    // track from where we last printed to get needed capacity
-    // s_p        s_p
-    //        |   |       xxxxxxx
-    // -------    --------       -------
-    var start_print: usize = 0;
+    // track from where we last printed to get needed capacity + printing
+    // s1         s2
+    // -------|xxx|------|------
+    // d1
+    // -------|------|------
+    var src_start: usize = 0;
     var total_len: usize = 0;
     for (skiplist.items) |skipentry| {
         if (skipentry.used == false) {
-            total_len += skipentry.start - start_print;
-            start_print = skipentry.end;
+            total_len += skipentry.start - src_start;
+            src_start = skipentry.end;
         }
     }
-    if (start_print != parsed.source.len) {
-        total_len += parsed.source.len - start_print;
+    if (src_start != parsed.source.len) {
+        total_len += parsed.source.len - src_start;
     }
     var redtest = try alloc.alignedAlloc(u8, @alignOf([]u8), total_len);
-    start_print = 0;
+    src_start = 0;
+    var dest_start: usize = 0;
     for (skiplist.items) |skipentry| {
         if (skipentry.used == false) {
-            std.mem.copy(u8, redtest, parsed.source[start_print..skipentry.start]);
-            start_print = skipentry.end;
+            std.mem.copy(u8, redtest[dest_start..], parsed.source[src_start..skipentry.start]);
+            dest_start = dest_start + (skipentry.start - src_start);
+            src_start = skipentry.end;
         }
     }
-    if (start_print != parsed.source.len) {
-        std.mem.copy(u8, redtest, parsed.source[start_print..]);
+    if (src_start != parsed.source.len) {
+        std.mem.copy(u8, redtest[dest_start..], parsed.source[src_start..]);
     }
+    // std.debug.print("total_len {d}, src_start: {d}, parsed_src.len: {d}\n", .{ total_len, src_start, parsed.source.len });
+
     return redtest;
 }
 
@@ -252,6 +258,20 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
 
     var testred = try testBlockReduction(gpa, &parsed, config, in_beh);
     defer gpa.free(testred);
+
+    var tree = std.zig.parse(gpa, testred) catch |err| {
+        stdout.print("--------INITIAL REDUCTION--------\n{s}---------------------------------\n", .{testred}) catch {};
+        fatal("error parsing reduced test: {}", .{err});
+    };
+    defer tree.deinit(gpa);
+    //std.log.debug("{s}\n", .{testred});
+
+    const formatted = try tree.render(gpa);
+    defer gpa.free(formatted);
+
+    try stdout.writeAll("--------INITIAL REDUCTION--------\n");
+    try stdout.writeAll(testred);
+    try stdout.writeAll("---------------------------------\n");
 
     std.debug.assert(in_beh.fail == Fail.Run);
     // 1. test block reduction
