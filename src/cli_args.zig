@@ -6,7 +6,7 @@ const stdout = std.io.getStdOut();
 const stderr = std.io.getStdErr();
 
 const usage: []const u8 =
-    \\ -h | inputfile
+    \\ -h | inputfile [prefixpath]
     \\ For now, only test blocks are supported.
 ;
 
@@ -17,7 +17,7 @@ pub fn validateArgs(args: [][]const u8) !Config {
         try stderr.writer().print("Usage: {s} {s}\n", .{ args[0], usage });
         std.process.exit(0);
     }
-    if (args.len != 2) {
+    if (args.len < 2 or 3 < args.len) {
         try stderr.writer().print("Usage: {s} {s}\n", .{ args[0], usage });
         std.process.exit(0);
     }
@@ -25,9 +25,13 @@ pub fn validateArgs(args: [][]const u8) !Config {
         try stdout.writer().print("Usage: {s} {s}\n", .{ args[0], usage });
         std.process.exit(0);
     }
-    return main.Config{
+    var config = main.Config{
         .in_path = args[1],
+        .out_path = "tmp/",
     };
+
+    if (args.len == 3) config.out_path = args[2];
+    return config;
     // if (args.len >= 255) {
     //     try stdout.writer().writeAll("At maximum 255 arguments are supported\n");
     //     process.exit(1);

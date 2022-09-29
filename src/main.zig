@@ -1,9 +1,11 @@
 const std = @import("std");
 const cli_args = @import("cli_args.zig");
 
+const FILEPATHBUF = 100;
+
 pub const Config = struct {
     in_path: []const u8,
-    out_path: []const u8 = "/tmp/",
+    out_path: []const u8,
 };
 
 const Fail = enum {
@@ -18,7 +20,7 @@ const InBehave = struct {
 
 const State = struct {
     out_nr: u64,
-    //split_queue
+    // split_queue
     flist: []*?std.fs.File,
     fn init() State {
         return State{
@@ -31,6 +33,7 @@ const State = struct {
 const stdout = std.io.getStdOut();
 const stderr = std.io.getStdErr();
 
+// Assume: Input file is valid Zig code
 // 1. test file input
 // 2. expected behavior = capture output of reference file
 // 3. reduction strategies
@@ -120,14 +123,25 @@ const TokenRange = struct {
     used: bool,
 };
 
+inline fn combineFilePath(filepathbuf: []u8, config: *Config, state: *State) ![]u8 {
+    std.mem.copy(u8, filepathbuf[0..], config.out_path[0..]);
+    const pathprefnr = try std.fmt.bufPrint(filepathbuf[config.out_path.len..], "{d}", .{state.out_nr});
+    const len_prefix0path = config.out_path.len + pathprefnr.len;
+    std.debug.assert(len_prefix0path < filepathbuf.len);
+    std.mem.copy(u8, filepathbuf[len_prefix0path..], config.in_path);
+    const len_filepath = len_prefix0path + config.in_path.len;
+    return filepathbuf[0..len_filepath];
+}
+
 /// Removes block by block and returns the resulting program string
-/// astrict monotonic, assume: tests have no side effects
+/// strict monotonic, assume: tests have no side effects
 /// Caller owns returned memory
 fn testBlockReduction(
     alloc: std.mem.Allocator,
     parsed: *Parsed,
     config: *Config,
     in_behave: *InBehave,
+    state: *State,
 ) ![:0]u8 {
     std.debug.assert(in_behave.fail == Fail.Run);
     // idea: skip removal of test block, if error can not be reproduced
@@ -178,36 +192,27 @@ fn testBlockReduction(
     }
     std.debug.assert(cnt_roottest == skiplist.items.len);
 
-    // write to new tmp/ file and compile+run to compare if error reproduces
-    std.fs.cwd().makeDir("tmp") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    const pathprefix = "tmp/";
-    var filepathbuf: [100]u8 = undefined;
-    var i: u8 = 0;
-    while (i < cnt_roottest) : (i += 1) {
-        std.mem.copy(u8, filepathbuf[0..], pathprefix[0..]);
-        const pathprefnr = try std.fmt.bufPrint(filepathbuf[pathprefix.len..], "{d}", .{i});
-        const len_prefix0path = pathprefix.len + pathprefnr.len;
-        std.debug.assert(len_prefix0path < filepathbuf.len);
-        std.mem.copy(u8, filepathbuf[len_prefix0path..], config.in_path);
-        const len_filepath = len_prefix0path + config.in_path.len;
-        const filepath = filepathbuf[0..len_filepath];
+    try std.fs.cwd().makePath(config.out_path);
+
+    // write file to path and compile+run to compare if error reproduces
+    var filepathbuf: [FILEPATHBUF]u8 = undefined;
+    while (state.out_nr < cnt_roottest) : (state.out_nr += 1) {
+        const filepath = try combineFilePath(filepathbuf[0..], config, state);
         {
             var file = try std.fs.cwd().createFile(filepath, .{});
             defer file.close();
-            try file.writeAll(parsed.source[0..skiplist.items[i].start]);
-            try file.writeAll(parsed.source[skiplist.items[i].end..]);
+            try file.writeAll(parsed.source[0..skiplist.items[state.out_nr].start]);
+            try file.writeAll(parsed.source[skiplist.items[state.out_nr].end..]);
         }
         {
             const res_run = try std.ChildProcess.exec(.{
                 .allocator = arena,
                 .argv = &[_][]const u8{ "zig", "test", filepath },
             });
-            // std.log.debug("filepath: {s}, in term exit: {d}, res term exit: {d}\n", .{ filepath, in_behave.exec_res.term.Exited, res_run.term.Exited });
+            std.log.debug("zig test {s}\n", .{filepath});
+            std.log.debug("in term_exit: {d}, this term_exit: {d}\n", .{ in_behave.exec_res.term.Exited, res_run.term.Exited });
             if (in_behave.exec_res.term.Exited == res_run.term.Exited)
-                skiplist.items[i].used = false;
+                skiplist.items[state.out_nr].used = false;
             // This could also compare the output etc, but keep it simple
         }
     }
@@ -250,31 +255,51 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(!general_purpose_allocator.deinit());
     const gpa = general_purpose_allocator.allocator();
-
-    // input file assumed to be valid Zig
-    var parsed = try openAndParseFile(gpa, config.in_path);
-    defer gpa.free(parsed.source);
-    defer parsed.tree.deinit(gpa);
-
-    var testred = try testBlockReduction(gpa, &parsed, config, in_beh);
-    defer gpa.free(testred);
-
-    var tree = std.zig.parse(gpa, testred) catch |err| {
-        stdout.writer().print("--------INITIAL REDUCTION--------\n{s}---------------------------------\n", .{testred}) catch {};
-        fatal("error parsing reduced test: {}", .{err});
-    };
-    defer tree.deinit(gpa);
-
-    const formatted = try tree.render(gpa);
-    defer gpa.free(formatted);
-
-    try stdout.writeAll("--------INITIAL REDUCTION--------\n");
-    try stdout.writeAll(formatted);
-    try stdout.writeAll("---------------------------------\n");
+    var state = State.init();
 
     std.debug.assert(in_beh.fail == Fail.Run);
-    // 1. test block reduction
-    // queue to iterate through all member of rootDecls
+    {
+        // reduce root test decls, which should always succeed
+        var parsed = try openAndParseFile(gpa, config.in_path);
+        defer gpa.free(parsed.source);
+        defer parsed.tree.deinit(gpa);
+
+        var testred = try testBlockReduction(gpa, &parsed, config, in_beh, &state);
+        defer gpa.free(testred);
+
+        var tree = std.zig.parse(gpa, testred) catch |err| {
+            stdout.writer().print("--------INITIAL REDUCTION--------\n{s}---------------------------------\n", .{testred}) catch {};
+            fatal("error parsing reduced test: {}", .{err});
+        };
+        defer tree.deinit(gpa);
+
+        const formatted = try tree.render(gpa);
+        defer gpa.free(formatted);
+
+        try stdout.writer().print("--------INITIAL REDUCTION--------\n{s}---------------------------------\n", .{formatted});
+        var filepathbuf: [FILEPATHBUF]u8 = undefined;
+        const filepath = try combineFilePath(filepathbuf[0..], config, &state);
+        var file = try std.fs.cwd().createFile(filepath, .{});
+        defer file.close();
+        try file.writeAll(formatted);
+    }
+
+    {
+        // From here on analysis is more costly, so we need to sort the skip list
+        // by indices on addition and merge skip list ranges.
+
+        // TODO:
+        // - resolve packages (check how autodoc does it with ZIR)
+        //   Zir: import, c_import,
+        //   no Zir: @This
+        // - index all symbols
+        // - find all used files
+        // - detect unused functions
+        // TODO: index all symbols
+
+        // 1. test block reduction
+        // queue to iterate through all member of rootDecls
+    }
 }
 
 // void llvm::runDeltaPasses(TestRunner &Tester, int MaxPassIterations) {
