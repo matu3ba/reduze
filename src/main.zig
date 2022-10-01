@@ -309,20 +309,32 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
     }
 
     {
-        // From here on analysis is more costly, so we need to sort the skip list
-        // by indices on addition and merge skip list ranges.
+        // From here on analysis is slow (bottom up approach):
+        // Only removing top-decl, which is only used to debug print, would
+        // require complex analysis, for which we are missing semantic
+        // information to not run into edge cases.
+        //
+        // Unused object analysis relies on compilation failure message:
+        // If `test --test-no-exec` returns "unused error", parse
+        // compilation error source locations to remove that object.
+        //
+        // Strategies:
+        // - reduce imports with _
+        // - bottom-up approach
+        //   * from end to start of context:
+        //     if (!has_inner_statement)
+        //        removeCtx();
+        //     else
+        //        removeStmt();
+        //   * start with end of test block; then traverse control flow
 
-        // TODO:
-        // - resolve packages (check how autodoc does it with ZIR)
-        //   Zir: import, c_import,
-        //   no Zir: @This
+        // TODO
+        // - resolve packages: Sema as it relies on comptime
+        //   Zir: import, c_import, no Zir: @This
         // - index all symbols
-        // - find all used files
-        // - detect unused functions
-        // TODO: index all symbols
+        // figure out how to store control flow
+        // TODO
 
-        // 1. test block reduction
-        // queue to iterate through all member of rootDecls
     }
 }
 
