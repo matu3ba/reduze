@@ -133,8 +133,10 @@ inline fn combineFilePath(filepathbuf: []u8, config: *Config, state: *State) ![]
     return filepathbuf[0..len_filepath];
 }
 
-/// Removes block by block and returns the resulting program string
-/// strict monotonic, assume: tests have no side effects
+/// Reduces test blocks, assume: tests have no side effects (on each other)
+///
+/// Removes all but one block in each operation for each block, writes file
+/// for `zig test` and compares against the expected execution result.
 /// Caller owns returned memory
 fn testBlockReduction(
     alloc: std.mem.Allocator,
@@ -143,6 +145,7 @@ fn testBlockReduction(
     in_behave: *InBehave,
     state: *State,
 ) ![:0]u8 {
+    // TODO: use zig test --test-no-exec, zig test
     std.debug.assert(in_behave.fail == Fail.Run);
     // idea: skip removal of test block, if error can not be reproduced
     var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -161,8 +164,8 @@ fn testBlockReduction(
             else => {},
         }
     }
-    var skiplist = try std.ArrayList(TokenRange).initCapacity(arena, cnt_roottest);
-    defer skiplist.deinit();
+    var test_ranges = try std.ArrayList(TokenRange).initCapacity(arena, cnt_roottest);
+    defer test_ranges.deinit();
     for (members) |member| {
         // const main_tokens = parsed.tree.nodes.items(.main_token);
         const datas = parsed.tree.nodes.items(.data);
@@ -178,10 +181,10 @@ fn testBlockReduction(
                 const rbrace = parsed.tree.lastToken(block_node);
                 const rbrace_srcloc = parsed.tree.tokenLocation(0, rbrace);
 
-                skiplist.appendAssumeCapacity(TokenRange{
+                test_ranges.appendAssumeCapacity(TokenRange{
                     .start = lbrace_srcloc.line_start,
                     .end = rbrace_srcloc.line_end,
-                    .used = true,
+                    .used = false,
                 });
 
                 // try stdout.writeAll(parsed.source[lbrace_srcloc.line_start..rbrace_srcloc.line_end]);
@@ -190,19 +193,40 @@ fn testBlockReduction(
             else => {},
         }
     }
-    std.debug.assert(cnt_roottest == skiplist.items.len);
+    std.debug.assert(cnt_roottest == test_ranges.items.len);
 
     try std.fs.cwd().makePath(config.out_path);
 
-    // write file to path and compile+run to compare if error reproduces
+    // write file to path with only the investigated token_range (without other
+    // test blocks) and rest of file
+    // Then compile+run to compare if error reproduces
+    // TODO: separate state out_nr from loop
     var filepathbuf: [FILEPATHBUF]u8 = undefined;
     while (state.out_nr < cnt_roottest) : (state.out_nr += 1) {
+        var print_start: usize = 0;
         const filepath = try combineFilePath(filepathbuf[0..], config, state);
+        var file = try std.fs.cwd().createFile(filepath, .{});
+        defer file.close();
+        for (test_ranges.items) |token_range, i| {
+            if (i == state.out_nr) {
+                try file.writeAll(parsed.source[print_start..token_range.end]);
+                print_start = token_range.end;
+                continue;
+            }
+            try file.writeAll(parsed.source[print_start..token_range.start]);
+            print_start = token_range.end;
+        }
+        if (print_start != parsed.source.len) {
+            try file.writeAll(parsed.source[print_start..parsed.source.len]);
+            print_start = parsed.source.len;
+        }
         {
-            var file = try std.fs.cwd().createFile(filepath, .{});
-            defer file.close();
-            try file.writeAll(parsed.source[0..skiplist.items[state.out_nr].start]);
-            try file.writeAll(parsed.source[skiplist.items[state.out_nr].end..]);
+            const res_run = try std.ChildProcess.exec(.{
+                .allocator = arena,
+                .argv = &[_][]const u8{ "zig", "test", "--test-no-exec", filepath },
+            });
+            std.log.debug("zig test {s}\n", .{filepath});
+            std.debug.assert(res_run.term.Exited == 0);
         }
         {
             const res_run = try std.ChildProcess.exec(.{
@@ -212,7 +236,7 @@ fn testBlockReduction(
             std.log.debug("zig test {s}\n", .{filepath});
             std.log.debug("in term_exit: {d}, this term_exit: {d}\n", .{ in_behave.exec_res.term.Exited, res_run.term.Exited });
             if (in_behave.exec_res.term.Exited == res_run.term.Exited)
-                skiplist.items[state.out_nr].used = false;
+                test_ranges.items[state.out_nr].used = true;
             // This could also compare the output etc, but keep it simple
         }
     }
@@ -224,7 +248,7 @@ fn testBlockReduction(
     // -------|------|------
     var src_start: usize = 0;
     var total_len: usize = 0;
-    for (skiplist.items) |skipentry| {
+    for (test_ranges.items) |skipentry| {
         if (skipentry.used == false) {
             total_len += skipentry.start - src_start;
             src_start = skipentry.end;
@@ -236,7 +260,7 @@ fn testBlockReduction(
     var redtest: [:0]u8 = try alloc.allocSentinel(u8, total_len, 0);
     src_start = 0;
     var dest_start: usize = 0;
-    for (skiplist.items) |skipentry| {
+    for (test_ranges.items) |skipentry| {
         if (skipentry.used == false) {
             std.mem.copy(u8, redtest[dest_start..], parsed.source[src_start..skipentry.start]);
             dest_start = dest_start + (skipentry.start - src_start);

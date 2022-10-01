@@ -1,2 +1,9 @@
 /zig-cache/
 /zig-out/
+
+# vim session and tags
+/sess
+/tags
+
+# tmp files
+/tmp
