@@ -133,6 +133,80 @@ inline fn combineFilePath(filepathbuf: []u8, config: *Config, state: *State) ![]
     return filepathbuf[0..len_filepath];
 }
 
+fn countTestBlocks(parsed: *Parsed) u32 {
+    // TODO: fixup for arbitrary test blocks
+    const members = parsed.tree.rootDecls(); // Ast.Node.Index
+    std.debug.assert(members.len > 0);
+    var cnt_roottest: u32 = 0;
+    for (members) |member| {
+        const decl = member;
+        switch (parsed.tree.nodes.items(.tag)[decl]) {
+            .test_decl => {
+                cnt_roottest += 1;
+            },
+            else => {},
+        }
+    }
+    return cnt_roottest;
+}
+
+/// Must be called with cnt_roottest generated from countTestBlocks
+/// Caller owns memory.
+fn getTestBlockDecls(alloc: std.mem.Allocator, parsed: *Parsed, cnt_roottest: u32) ![]std.zig.Ast.TokenIndex {
+    var decls = try std.ArrayList(std.zig.Ast.TokenIndex).initCapacity(alloc, cnt_roottest);
+    defer decls.deinit();
+    const members = parsed.tree.rootDecls(); // Ast.Node.Index
+    for (members) |member| {
+        const decl = member;
+        switch (parsed.tree.nodes.items(.tag)[decl]) {
+            .test_decl => {
+                decls.appendAssumeCapacity(decl);
+            },
+            else => {},
+        }
+    }
+    std.debug.assert(cnt_roottest == decls.items.len);
+    return decls.toOwnedSlice();
+}
+
+/// Must be called with cnt_roottest generated from countTestBlocks
+/// Caller owns memory.
+fn getTestBlockRanges(alloc: std.mem.Allocator, parsed: *Parsed, cnt_roottest: u32) ![]TokenRange {
+    // TODO: fixup for arbitrary test blocks
+    var test_blocks = try std.ArrayList(TokenRange).initCapacity(alloc, cnt_roottest);
+    defer test_blocks.deinit();
+    const members = parsed.tree.rootDecls(); // Ast.Node.Index
+    for (members) |member| {
+        // const main_tokens = parsed.tree.nodes.items(.main_token);
+        const datas = parsed.tree.nodes.items(.data);
+        const node_tags = parsed.tree.nodes.items(.tag);
+        const decl = member;
+        switch (node_tags[decl]) {
+            .test_decl => {
+                const node = datas[decl].rhs; // std.Ast.Node.Index
+                std.debug.assert(node_tags[node] == .block_two_semicolon);
+                const block_node = node;
+                const lbrace = parsed.tree.nodes.items(.main_token)[block_node];
+                const lbrace_srcloc = parsed.tree.tokenLocation(0, lbrace);
+                const rbrace = parsed.tree.lastToken(block_node);
+                const rbrace_srcloc = parsed.tree.tokenLocation(0, rbrace);
+
+                test_blocks.appendAssumeCapacity(TokenRange{
+                    .start = lbrace_srcloc.line_start,
+                    .end = rbrace_srcloc.line_end,
+                    .used = false,
+                });
+
+                // try stdout.writeAll(parsed.source[lbrace_srcloc.line_start..rbrace_srcloc.line_end]);
+                // try stdout.writer().writeAll("\n");
+            },
+            else => {},
+        }
+    }
+    std.debug.assert(cnt_roottest == test_blocks.items.len);
+    return test_blocks.toOwnedSlice();
+}
+
 /// Reduces test blocks, assume: tests have no side effects (on each other)
 ///
 /// Removes all but one block in each operation for each block, writes file
@@ -152,49 +226,8 @@ fn testBlockReduction(
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
 
-    const members = parsed.tree.rootDecls(); // Ast.Node.Index
-    std.debug.assert(members.len > 0);
-    var cnt_roottest: u32 = 0;
-    for (members) |member| {
-        const decl = member;
-        switch (parsed.tree.nodes.items(.tag)[decl]) {
-            .test_decl => {
-                cnt_roottest += 1;
-            },
-            else => {},
-        }
-    }
-    var test_ranges = try std.ArrayList(TokenRange).initCapacity(arena, cnt_roottest);
-    defer test_ranges.deinit();
-    for (members) |member| {
-        // const main_tokens = parsed.tree.nodes.items(.main_token);
-        const datas = parsed.tree.nodes.items(.data);
-        const node_tags = parsed.tree.nodes.items(.tag);
-        const decl = member;
-        switch (parsed.tree.nodes.items(.tag)[decl]) {
-            .test_decl => {
-                const node = datas[decl].rhs; // std.Ast.Node.Index
-                std.debug.assert(node_tags[node] == .block_two_semicolon);
-                const block_node = node;
-                const lbrace = parsed.tree.nodes.items(.main_token)[block_node];
-                const lbrace_srcloc = parsed.tree.tokenLocation(0, lbrace);
-                const rbrace = parsed.tree.lastToken(block_node);
-                const rbrace_srcloc = parsed.tree.tokenLocation(0, rbrace);
-
-                test_ranges.appendAssumeCapacity(TokenRange{
-                    .start = lbrace_srcloc.line_start,
-                    .end = rbrace_srcloc.line_end,
-                    .used = false,
-                });
-
-                // try stdout.writeAll(parsed.source[lbrace_srcloc.line_start..rbrace_srcloc.line_end]);
-                // try stdout.writer().writeAll("\n");
-            },
-            else => {},
-        }
-    }
-    std.debug.assert(cnt_roottest == test_ranges.items.len);
-
+    const cnt_roottest = countTestBlocks(parsed);
+    const test_blocks = try getTestBlockRanges(arena, parsed, cnt_roottest);
     try std.fs.cwd().makePath(config.out_path);
 
     // write file to path with only the investigated token_range (without other
@@ -207,7 +240,7 @@ fn testBlockReduction(
         const filepath = try combineFilePath(filepathbuf[0..], config, state);
         var file = try std.fs.cwd().createFile(filepath, .{});
         defer file.close();
-        for (test_ranges.items) |token_range, i| {
+        for (test_blocks) |token_range, i| {
             if (i == state.out_nr) {
                 try file.writeAll(parsed.source[print_start..token_range.end]);
                 print_start = token_range.end;
@@ -225,18 +258,18 @@ fn testBlockReduction(
                 .allocator = arena,
                 .argv = &[_][]const u8{ "zig", "test", "--test-no-exec", filepath },
             });
-            std.log.debug("zig test {s}\n", .{filepath});
             std.debug.assert(res_run.term.Exited == 0);
+            std.log.debug("zig test --test-no-exec {s} compiled", .{filepath});
         }
         {
             const res_run = try std.ChildProcess.exec(.{
                 .allocator = arena,
                 .argv = &[_][]const u8{ "zig", "test", filepath },
             });
-            std.log.debug("zig test {s}\n", .{filepath});
-            std.log.debug("in term_exit: {d}, this term_exit: {d}\n", .{ in_behave.exec_res.term.Exited, res_run.term.Exited });
+            std.log.debug("zig test {s}", .{filepath});
+            std.log.debug("expected term_exit: {d}, this term_exit: {d}", .{ in_behave.exec_res.term.Exited, res_run.term.Exited });
             if (in_behave.exec_res.term.Exited == res_run.term.Exited)
-                test_ranges.items[state.out_nr].used = true;
+                test_blocks[state.out_nr].used = true;
             // This could also compare the output etc, but keep it simple
         }
     }
@@ -248,7 +281,7 @@ fn testBlockReduction(
     // -------|------|------
     var src_start: usize = 0;
     var total_len: usize = 0;
-    for (test_ranges.items) |skipentry| {
+    for (test_blocks) |skipentry| {
         if (skipentry.used == false) {
             total_len += skipentry.start - src_start;
             src_start = skipentry.end;
@@ -260,7 +293,7 @@ fn testBlockReduction(
     var redtest: [:0]u8 = try alloc.allocSentinel(u8, total_len, 0);
     src_start = 0;
     var dest_start: usize = 0;
-    for (test_ranges.items) |skipentry| {
+    for (test_blocks) |skipentry| {
         if (skipentry.used == false) {
             std.mem.copy(u8, redtest[dest_start..], parsed.source[src_start..skipentry.start]);
             dest_start = dest_start + (skipentry.start - src_start);
@@ -310,7 +343,7 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
 
     {
         // From here on analysis is slow (bottom up approach):
-        // Only removing top-decl, which is only used to debug print, would
+        // Only removing top-decl, which is used to debug print, would
         // require complex analysis, for which we are missing semantic
         // information to not run into edge cases.
         //
@@ -319,7 +352,9 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
         // compilation error source locations to remove that object.
         //
         // Strategies:
-        // - reduce imports with _
+        // - keep the file and only work with skiplist, because we identified
+        //   necessary runtime contexts
+        // - reduce imports with _ (heavily used in tests)
         // - bottom-up approach
         //   * from end to start of context:
         //     if (!has_inner_statement)
@@ -327,6 +362,44 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
         //     else
         //        removeStmt();
         //   * start with end of test block; then traverse control flow
+
+        // TODO: fixup for arbitrary test blocks
+        var filepathbuf: [FILEPATHBUF]u8 = undefined;
+        const filepath = try combineFilePath(filepathbuf[0..], config, &state);
+        var parsed = try openAndParseFile(gpa, filepath);
+        defer gpa.free(parsed.source);
+        defer parsed.tree.deinit(gpa);
+
+        var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena_instance.deinit();
+        const arena = arena_instance.allocator();
+        const cnt_roottest = countTestBlocks(&parsed);
+        const test_block_decls = try getTestBlockDecls(arena, &parsed, cnt_roottest);
+
+        // tests within tests are forbidden in Zig
+        for (test_block_decls) |test_blk_decl| {
+            // const main_tokens = parsed.tree.nodes.items(.main_token);
+            const datas = parsed.tree.nodes.items(.data);
+            const node_tags = parsed.tree.nodes.items(.tag);
+
+            const node_index = datas[test_blk_decl].rhs;
+            std.log.debug("tag[{d}]: {}", .{ node_index, node_tags[node_index] });
+            switch (node_tags[node_index]) {
+                .block_two_semicolon => {},
+                else => {},
+            }
+
+            // only handle statements for now
+
+            // try it simple first
+            // TODO get all children
+            // var i: u32 = 0;
+            // while (i>test_block.
+
+        }
+        // const test_blocks: []TokenRange =
+        // defer gpa.free(test_blocks);
+        // const lastToken = getLastToken(ctx);
 
         // TODO
         // - resolve packages: Sema as it relies on comptime
