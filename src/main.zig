@@ -116,16 +116,6 @@ const TokenRange = struct {
     used: bool,
 };
 
-inline fn combineFilePath(filepathbuf: []u8, config: *Config, state: *State) ![]u8 {
-    std.mem.copy(u8, filepathbuf[0..], config.out_path[0..]);
-    const pathprefnr = try std.fmt.bufPrint(filepathbuf[config.out_path.len..], "{d}", .{state.out_nr});
-    const len_prefix0path = config.out_path.len + pathprefnr.len;
-    std.debug.assert(len_prefix0path < filepathbuf.len);
-    std.mem.copy(u8, filepathbuf[len_prefix0path..], config.in_path);
-    const len_filepath = len_prefix0path + config.in_path.len;
-    return filepathbuf[0..len_filepath];
-}
-
 fn countTestBlocks(parsed: *Parsed) u32 {
     // TODO: fixup for arbitrary test blocks
     const members = parsed.tree.rootDecls(); // Ast.Node.Index
@@ -201,26 +191,108 @@ fn getTestBlockRanges(alloc: std.mem.Allocator, parsed: *Parsed, cnt_roottest: u
     return test_blocks.toOwnedSlice();
 }
 
-/// Tries to reduce a given statement of the overall file
+/// assume: file is opened and valid file descriptor
+/// assume: skip list contains only unused token_ranges
+/// assume: skiplist has indices pointing into skiplist, sorting them in
+/// ascending order of the file
+fn writeFileWithSkips(
+    file: std.fs.File,
+    parsed: *Parsed,
+    skiplist: *std.ArrayList(TokenRange),
+    skipl_index: *std.ArrayList(usize),
+) !void {
+    var print_start: usize = 0;
+    for (skipl_index.items) |index_into_skiplist| {
+        const token_range = skiplist.items[index_into_skiplist];
+        try file.writeAll(parsed.source[print_start..token_range.start]);
+        print_start = token_range.end;
+    }
+    if (print_start != parsed.source.len) {
+        try file.writeAll(parsed.source[print_start..parsed.source.len]);
+        print_start = parsed.source.len;
+    }
+}
+
+fn orderSkipIndex(context: void, lhs: usize, rhs: usize) std.math.Order {
+    _ = context;
+    return std.math.order(lhs, rhs);
+}
+
+/// Tries to reduce a given statement of the overall file by writing the code
+/// without the statement to a file, compile, run it and compare excpted behavior.
 /// Returns success status.
 /// On success, skiplist is appended and skipl_index updated.
 /// Caller must handle state change, if wanted.
 fn reduceStatement(
-    filepath: []const u8,
+    alloc: std.mem.Allocator,
+    filepath: []u8,
     parsed: *Parsed,
-    config: *Config,
-    state: *State,
-    skiplist: std.ArrayList(TokenRange),
-    skipl_index: std.ArrayList(u32),
-    decl: std.Ast.TokenIndex,
+    in_behave: *InBehave,
+    skiplist: *std.ArrayList(TokenRange),
+    skipl_index: *std.ArrayList(usize),
+    stmt_node: std.zig.Ast.Node.Index,
 ) !bool {
-    _ = filepath;
-    _ = parsed;
-    _ = config;
-    _ = state;
-    _ = skiplist;
-    _ = skipl_index;
-    _ = decl;
+    var file = try std.fs.cwd().createFile(filepath, .{});
+    defer file.close();
+
+    const main_tokens = parsed.tree.nodes.items(.main_token);
+    // const datas = parsed.tree.nodes.items(.data);
+    // const node_tags = parsed.tree.nodes.items(.tag);
+
+    const lbrace = main_tokens[stmt_node];
+    const lbrace_srcloc = parsed.tree.tokenLocation(0, lbrace);
+    const rbrace = parsed.tree.lastToken(stmt_node);
+    const rbrace_srcloc = parsed.tree.tokenLocation(0, rbrace);
+
+    // const src_range = parsed.source[lbrace_srcloc.line_start..rbrace_srcloc.line_end];
+    // std.debug.print("stmt_node[{d}]: {s}\n", .{ stmt_node, src_range });
+
+    const addel_skiplist = TokenRange{
+        .start = lbrace_srcloc.line_start,
+        .end = rbrace_srcloc.line_end,
+        .used = false,
+    };
+    try skiplist.append(addel_skiplist);
+    const new_skipl_index = skiplist.items.len - 1;
+    try skipl_index.append(new_skipl_index);
+    std.sort.sort(usize, skipl_index.items, skiplist, sortTokenIndices);
+    try writeFileWithSkips(file, parsed, skiplist, skipl_index);
+
+    const res_comp = try std.ChildProcess.exec(.{
+        .allocator = alloc,
+        .argv = &[_][]const u8{ "zig", "test", "--test-no-exec", filepath },
+    });
+    defer alloc.free(res_comp.stdout);
+    defer alloc.free(res_comp.stderr);
+    //TODO fixup unused var errors
+    // if (res_comp.term.Exited != 0)
+    std.debug.assert(res_comp.term.Exited == 0);
+    std.log.debug("reduceStatement: 'zig test --test-no-exec {s}' compiled", .{filepath});
+
+    const res_run = try std.ChildProcess.exec(.{
+        .allocator = alloc,
+        .argv = &[_][]const u8{ "zig", "test", filepath },
+    });
+    defer alloc.free(res_run.stdout);
+    defer alloc.free(res_run.stderr);
+    std.log.debug("reduceStatement: 'zig test {s}' exit status: {d}", .{ filepath, res_run.term.Exited });
+
+    if (res_run.term.Exited == in_behave.exec_res.term.Exited)
+        return true;
+
+    // restore skiplist and index
+    const popped = skiplist.pop();
+    std.debug.assert(popped.start == addel_skiplist.start and popped.end == addel_skiplist.end and popped.used == addel_skiplist.used);
+    const pos = std.sort.binarySearch(
+        usize,
+        new_skipl_index,
+        skipl_index.items,
+        {},
+        orderSkipIndex,
+    ).?;
+    std.debug.assert(skipl_index.swapRemove(pos) == new_skipl_index);
+    std.sort.sort(usize, skipl_index.items, skiplist, sortTokenIndices);
+    return false;
 }
 
 /// Reduces test blocks, assume: tests have no side effects (on each other)
@@ -235,7 +307,6 @@ fn testBlockReduction(
     in_behave: *InBehave,
     state: *State,
 ) ![:0]u8 {
-    // TODO: use zig test --test-no-exec, zig test
     std.debug.assert(in_behave.fail == Fail.Run);
     // idea: skip removal of test block, if error can not be reproduced
     var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -253,7 +324,12 @@ fn testBlockReduction(
     var filepathbuf: [FILEPATHBUF]u8 = undefined;
     while (state.out_nr < cnt_roottest) : (state.out_nr += 1) {
         var print_start: usize = 0;
-        const filepath = try combineFilePath(filepathbuf[0..], config, state);
+        const filepath = try std.fmt.bufPrint(
+            filepathbuf[0..],
+            "{s}{d}{s}",
+            .{ config.out_path, state.out_nr, config.in_path },
+        );
+
         var file = try std.fs.cwd().createFile(filepath, .{});
         defer file.close();
         for (test_blocks) |token_range, i| {
@@ -275,15 +351,16 @@ fn testBlockReduction(
                 .argv = &[_][]const u8{ "zig", "test", "--test-no-exec", filepath },
             });
             std.debug.assert(res_run.term.Exited == 0);
-            std.log.debug("'zig test --test-no-exec {s}' compiled", .{filepath});
+
+            std.log.debug("testBlockReduction: 'zig test --test-no-exec {s}' compiled", .{filepath});
         }
         {
             const res_run = try std.ChildProcess.exec(.{
                 .allocator = arena,
                 .argv = &[_][]const u8{ "zig", "test", filepath },
             });
-            std.log.debug("'zig test {s}'", .{filepath});
-            std.log.debug("expected term_exit: {d}, this term_exit: {d}", .{ in_behave.exec_res.term.Exited, res_run.term.Exited });
+            std.log.debug("testBlockReduction: 'zig test {s}'", .{filepath});
+            std.log.debug("testBlockReduction: expected term_exit: {d}, this term_exit: {d}", .{ in_behave.exec_res.term.Exited, res_run.term.Exited });
             if (in_behave.exec_res.term.Exited == res_run.term.Exited)
                 test_blocks[state.out_nr].used = true;
             // This could also compare the output etc, but keep it simple
@@ -388,7 +465,11 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
 
         try stdout.writer().print("--------INITIAL REDUCTION--------\n{s}---------------------------------\n", .{formatted});
         var filepathbuf: [FILEPATHBUF]u8 = undefined;
-        const filepath = try combineFilePath(filepathbuf[0..], config, &state);
+        const filepath = try std.fmt.bufPrint(
+            filepathbuf[0..],
+            "{s}{d}{s}",
+            .{ config.out_path, state.out_nr, config.in_path },
+        );
         var file = try std.fs.cwd().createFile(filepath, .{});
         defer file.close();
         try file.writeAll(formatted);
@@ -418,7 +499,11 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
 
         // TODO: fixup for arbitrary test blocks
         var filepathbuf: [FILEPATHBUF]u8 = undefined;
-        var filepath = try combineFilePath(filepathbuf[0..], config, &state);
+        var filepath = try std.fmt.bufPrint(
+            filepathbuf[0..],
+            "{s}{d}{s}",
+            .{ config.out_path, state.out_nr, config.in_path },
+        );
         var parsed = try openAndParseFile(gpa, filepath);
         defer gpa.free(parsed.source);
         defer parsed.tree.deinit(gpa);
@@ -438,7 +523,7 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
         // sorting index into skiplist:    0, 2, 1
         var skiplist = try std.ArrayList(TokenRange).initCapacity(gpa, cnt_roottest);
         defer skiplist.deinit();
-        var skipl_index = try std.ArrayList(TokenRange).initCapacity(gpa, cnt_roottest);
+        var skipl_index = try std.ArrayList(usize).initCapacity(gpa, cnt_roottest);
         defer skipl_index.deinit();
 
         // tests within tests are forbidden in Zig
@@ -462,30 +547,26 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
                     const rbrace = parsed.tree.lastToken(stmt_node);
                     const rbrace_srcloc = parsed.tree.tokenLocation(0, rbrace);
                     const src_range = parsed.source[lbrace_srcloc.line_start..rbrace_srcloc.line_end];
-
+                    std.log.debug("try to remove remove stmt {d}: {s}", .{ i, src_range });
                     {
-                        state.out_nr += 1;
-                        //writeFileForStep(filepath, &parsed, config, &state, skiplist, tokenrange);
-                        // filepathbuf gets overwritten here
-                        //filepath = try combineFilePath(filepathbuf[0..], config, &state);
-                        var file = try std.fs.cwd().createFile(filepath, .{});
-                        defer file.close();
+                        state.out_nr += 1; // update file number
 
-                        const res_run = try std.ChildProcess.exec(.{
-                            .allocator = arena,
-                            .argv = &[_][]const u8{ "zig", "test", "--test-no-exec", filepath },
-                        });
-                        std.debug.assert(res_run.term.Exited == 0);
-                        std.log.debug("'zig test --test-no-exec {s}' compiled", .{filepath});
+                        filepath = try std.fmt.bufPrint(
+                            filepathbuf[0..],
+                            "{s}{d}{s}",
+                            .{ config.out_path, state.out_nr, config.in_path },
+                        );
+                        _ = try reduceStatement(
+                            gpa,
+                            filepath,
+                            &parsed,
+                            in_beh,
+                            &skiplist,
+                            &skipl_index,
+                            stmt_node,
+                        );
+                        // TODO: failure1 has a broken deletion of the assertion!
                     }
-
-                    try skiplist.append(TokenRange{
-                        .start = lbrace_srcloc.line_start,
-                        .end = rbrace_srcloc.line_end,
-                        .used = true,
-                    });
-                    std.sort.sort(TokenRange, skiplist.items, {}, sortTokenRange);
-                    std.debug.print("stmt {d}: {s}\n", .{ i, src_range });
                 }
             }
         }
@@ -497,15 +578,25 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
         // figure out how to store control flow
         // TODO
 
-    }
+        // print result of reduction
+        state.out_nr += 1; // update file number
+        filepath = try std.fmt.bufPrint(
+            filepathbuf[0..],
+            "{s}{d}{s}",
+            .{ config.out_path, state.out_nr, config.in_path },
+        );
+        var file = try std.fs.cwd().createFile(filepath, .{});
+        defer file.close();
+        try writeFileWithSkips(file, &parsed, &skiplist, &skipl_index);
+        try stdout.writer().print("Result is in: ./{s}\n", .{filepath});
+    } // end of analysis
 }
 
 /// assume: distinct TokenRanges
 /// |----|
 ///      |----|
-pub fn sortTokenRange(context: void, a: TokenRange, b: TokenRange) bool {
-    _ = context;
-    return a.start < b.start;
+pub fn sortTokenIndices(context: *std.ArrayList(TokenRange), a: usize, b: usize) bool {
+    return context.items[a].start < context.items[b].start;
 }
 
 // void llvm::runDeltaPasses(TestRunner &Tester, int MaxPassIterations) {
