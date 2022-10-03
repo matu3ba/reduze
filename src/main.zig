@@ -33,13 +33,6 @@ const State = struct {
 const stdout = std.io.getStdOut();
 const stderr = std.io.getStdErr();
 
-// Assume: Input file is valid Zig code
-// 1. test file input
-// 2. expected behavior = capture output of reference file
-// 3. reduction strategies
-// -  1. remove test blocks
-// (4. validation strategy of step 3)
-
 pub fn main() !void {
     var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_instance.deinit();
@@ -177,16 +170,17 @@ fn getTestBlockRanges(alloc: std.mem.Allocator, parsed: *Parsed, cnt_roottest: u
     defer test_blocks.deinit();
     const members = parsed.tree.rootDecls(); // Ast.Node.Index
     for (members) |member| {
-        // const main_tokens = parsed.tree.nodes.items(.main_token);
+        const main_tokens = parsed.tree.nodes.items(.main_token);
         const datas = parsed.tree.nodes.items(.data);
         const node_tags = parsed.tree.nodes.items(.tag);
         const decl = member;
         switch (node_tags[decl]) {
             .test_decl => {
                 const node = datas[decl].rhs; // std.Ast.Node.Index
-                std.debug.assert(node_tags[node] == .block_two_semicolon);
+                std.debug.assert(isBlock(parsed.tree, node));
+                // std.debug.assert(node_tags[node] == .block_two_semicolon);
                 const block_node = node;
-                const lbrace = parsed.tree.nodes.items(.main_token)[block_node];
+                const lbrace = main_tokens[block_node];
                 const lbrace_srcloc = parsed.tree.tokenLocation(0, lbrace);
                 const rbrace = parsed.tree.lastToken(block_node);
                 const rbrace_srcloc = parsed.tree.tokenLocation(0, rbrace);
@@ -205,6 +199,28 @@ fn getTestBlockRanges(alloc: std.mem.Allocator, parsed: *Parsed, cnt_roottest: u
     }
     std.debug.assert(cnt_roottest == test_blocks.items.len);
     return test_blocks.toOwnedSlice();
+}
+
+/// Tries to reduce a given statement of the overall file
+/// Returns success status.
+/// On success, skiplist is appended and skipl_index updated.
+/// Caller must handle state change, if wanted.
+fn reduceStatement(
+    filepath: []const u8,
+    parsed: *Parsed,
+    config: *Config,
+    state: *State,
+    skiplist: std.ArrayList(TokenRange),
+    skipl_index: std.ArrayList(u32),
+    decl: std.Ast.TokenIndex,
+) !bool {
+    _ = filepath;
+    _ = parsed;
+    _ = config;
+    _ = state;
+    _ = skiplist;
+    _ = skipl_index;
+    _ = decl;
 }
 
 /// Reduces test blocks, assume: tests have no side effects (on each other)
@@ -259,14 +275,14 @@ fn testBlockReduction(
                 .argv = &[_][]const u8{ "zig", "test", "--test-no-exec", filepath },
             });
             std.debug.assert(res_run.term.Exited == 0);
-            std.log.debug("zig test --test-no-exec {s} compiled", .{filepath});
+            std.log.debug("'zig test --test-no-exec {s}' compiled", .{filepath});
         }
         {
             const res_run = try std.ChildProcess.exec(.{
                 .allocator = arena,
                 .argv = &[_][]const u8{ "zig", "test", filepath },
             });
-            std.log.debug("zig test {s}", .{filepath});
+            std.log.debug("'zig test {s}'", .{filepath});
             std.log.debug("expected term_exit: {d}, this term_exit: {d}", .{ in_behave.exec_res.term.Exited, res_run.term.Exited });
             if (in_behave.exec_res.term.Exited == res_run.term.Exited)
                 test_blocks[state.out_nr].used = true;
@@ -306,6 +322,43 @@ fn testBlockReduction(
     // std.debug.print("total_len {d}, src_start: {d}, parsed_src.len: {d}\n", .{ total_len, src_start, parsed.source.len });
 
     return redtest;
+}
+
+fn isBlock(tree: std.zig.Ast, node: std.zig.Ast.Node.Index) bool {
+    return switch (tree.nodes.items(.tag)[node]) {
+        .block_two,
+        .block_two_semicolon,
+        .block,
+        .block_semicolon,
+        => true,
+        else => false,
+    };
+}
+
+/// returns a list of statements
+pub fn blockStatements(
+    tree: std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+    buf: *[2]std.zig.Ast.Node.Index,
+) ?[]const std.zig.Ast.Node.Index {
+    const node_data = tree.nodes.items(.data);
+    return switch (tree.nodes.items(.tag)[node]) {
+        .block_two, .block_two_semicolon => {
+            buf[0] = node_data[node].lhs;
+            buf[1] = node_data[node].rhs;
+            if (node_data[node].lhs == 0) {
+                return buf[0..0];
+            } else if (node_data[node].rhs == 0) {
+                return buf[0..1];
+            } else {
+                return buf[0..2];
+            }
+        },
+        .block,
+        .block_semicolon,
+        => tree.extra_data[node_data[node].lhs..node_data[node].rhs],
+        else => return null,
+    };
 }
 
 fn mainLogic(config: *Config, in_beh: *InBehave) !void {
@@ -365,7 +418,7 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
 
         // TODO: fixup for arbitrary test blocks
         var filepathbuf: [FILEPATHBUF]u8 = undefined;
-        const filepath = try combineFilePath(filepathbuf[0..], config, &state);
+        var filepath = try combineFilePath(filepathbuf[0..], config, &state);
         var parsed = try openAndParseFile(gpa, filepath);
         defer gpa.free(parsed.source);
         defer parsed.tree.deinit(gpa);
@@ -376,30 +429,66 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
         const cnt_roottest = countTestBlocks(&parsed);
         const test_block_decls = try getTestBlockDecls(arena, &parsed, cnt_roottest);
 
+        // inserting can be at arbitrary position, but we want not
+        // to iterate whole list: keep a separate index into skiplist range
+        // |      ▲ ▲  ▲    |
+        // |      │ └─┐└┐   |
+        //        0   2 1
+        // skiplist range insertion order: 0, 1, 2
+        // sorting index into skiplist:    0, 2, 1
+        var skiplist = try std.ArrayList(TokenRange).initCapacity(gpa, cnt_roottest);
+        defer skiplist.deinit();
+        var skipl_index = try std.ArrayList(TokenRange).initCapacity(gpa, cnt_roottest);
+        defer skipl_index.deinit();
+
         // tests within tests are forbidden in Zig
         for (test_block_decls) |test_blk_decl| {
-            // const main_tokens = parsed.tree.nodes.items(.main_token);
+            const main_tokens = parsed.tree.nodes.items(.main_token);
             const datas = parsed.tree.nodes.items(.data);
             const node_tags = parsed.tree.nodes.items(.tag);
-
             const node_index = datas[test_blk_decl].rhs;
             std.log.debug("tag[{d}]: {}", .{ node_index, node_tags[node_index] });
-            switch (node_tags[node_index]) {
-                .block_two_semicolon => {},
-                else => {},
-            }
 
             // only handle statements for now
+            if (isBlock(parsed.tree, node_index)) {
+                var buffer: [2]std.zig.Ast.Node.Index = undefined;
+                var stmt_nodes = blockStatements(parsed.tree, node_index, &buffer).?;
+                var i: usize = stmt_nodes.len;
+                while (i > 0) {
+                    i -= 1;
+                    const stmt_node = stmt_nodes[i];
+                    const lbrace = main_tokens[stmt_node];
+                    const lbrace_srcloc = parsed.tree.tokenLocation(0, lbrace);
+                    const rbrace = parsed.tree.lastToken(stmt_node);
+                    const rbrace_srcloc = parsed.tree.tokenLocation(0, rbrace);
+                    const src_range = parsed.source[lbrace_srcloc.line_start..rbrace_srcloc.line_end];
 
-            // try it simple first
-            // TODO get all children
-            // var i: u32 = 0;
-            // while (i>test_block.
+                    {
+                        state.out_nr += 1;
+                        //writeFileForStep(filepath, &parsed, config, &state, skiplist, tokenrange);
+                        // filepathbuf gets overwritten here
+                        //filepath = try combineFilePath(filepathbuf[0..], config, &state);
+                        var file = try std.fs.cwd().createFile(filepath, .{});
+                        defer file.close();
 
+                        const res_run = try std.ChildProcess.exec(.{
+                            .allocator = arena,
+                            .argv = &[_][]const u8{ "zig", "test", "--test-no-exec", filepath },
+                        });
+                        std.debug.assert(res_run.term.Exited == 0);
+                        std.log.debug("'zig test --test-no-exec {s}' compiled", .{filepath});
+                    }
+
+                    try skiplist.append(TokenRange{
+                        .start = lbrace_srcloc.line_start,
+                        .end = rbrace_srcloc.line_end,
+                        .used = true,
+                    });
+                    std.sort.sort(TokenRange, skiplist.items, {}, sortTokenRange);
+                    std.debug.print("stmt {d}: {s}\n", .{ i, src_range });
+                }
+            }
         }
-        // const test_blocks: []TokenRange =
-        // defer gpa.free(test_blocks);
-        // const lastToken = getLastToken(ctx);
 
         // TODO
         // - resolve packages: Sema as it relies on comptime
@@ -409,6 +498,14 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
         // TODO
 
     }
+}
+
+/// assume: distinct TokenRanges
+/// |----|
+///      |----|
+pub fn sortTokenRange(context: void, a: TokenRange, b: TokenRange) bool {
+    _ = context;
+    return a.start < b.start;
 }
 
 // void llvm::runDeltaPasses(TestRunner &Tester, int MaxPassIterations) {

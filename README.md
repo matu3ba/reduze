@@ -2,6 +2,13 @@
 
 Current status: Vaporware.
 
+1. assume: Input file is valid Zig code
+2. test file input
+3. expected behavior = capture output of reference file
+4. Until Sema information is available, use a simple strategy.
+5. be conservative on deletions to always have valid Zig syntax
+6. parse compilation errors to simplify complexity, ie to detect unused vars
+
 ###### Using semantic info for reduction
 
 There is no official way to get Sema information out of the Zig compiler yet
