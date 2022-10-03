@@ -54,3 +54,43 @@ due to less combinations being necessary.
 
 Side-effects, especially of parallelized or asynchronous related behavior,
 require manual intervention + more statistics.
+
+###### (For now) Rejected ideas
+
+- Use an index to remember which AST nodes should not be rendered
+
+Idea: The simplest way to remove code, which is stored in memory, is to
+not print it via `render.zig` and keep track of this.
+
+Keeping track inside `render.zig` is very complex, because rendering works
+via recursive traversal of the source code.
+This is unlikely to change in the near future with the same justification of
+the change of the iterative parser into a recursive one: Maintenance costs
+are lower.
+Further more, the spacing and bracket logic inside `render.zig` is complex.
+
+- In-place modification of the AST
+
+Idea: we can store separately an index into the AST of valid and invalid nodes
+and modify internally the node structure to delete individual nodes.
+Then node traversal could use the existing render infrastructure (render.zig).
+
+If we already have the index into AST nodes, then we also have the TokenRange
+and execution of `render.zig` is slower than slicing + printing the file already
+stored inside memory.
+Further more, `render.zig` invalidates the TokenRange due to formatting, which
+in turn requires reparsing the emitted file to get correct AST info into the
+source locations.
+
+- Construction of a simplified AST
+
+Idea: The C backend has a simplified AST, for which nodes are much simpler to
+add or remove.
+
+The simplified AST can not express `try` and other Zig-specific things like
+`break` to a decl.
+This makes is unsuitable as target for an AST-to-simplified AST translation.
+This is a potential long-term solution, but in the long-term attaching semantic
+information for more complex structures is needed.
+Thus this is deferred due to complexity and additional upstream maintenance 
+until the requirements becomes more clear.
