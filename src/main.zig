@@ -1,5 +1,6 @@
 const std = @import("std");
 const cli_args = @import("cli_args.zig");
+// const lib = @import("lib.zig");
 
 const FILEPATHBUF = 100;
 
@@ -231,6 +232,7 @@ fn writeFileWithSkips(
             break;
         if (si == skipl_index.items.len) {
             while (ti < test_blocks.len) : (ti += 1) {
+                std.debug.print(">>>{s}<<<", .{parsed.source[print_start..test_blocks[ti].start]});
                 try file.writeAll(parsed.source[print_start..test_blocks[ti].start]);
                 print_start = test_blocks[ti].end;
             }
@@ -238,12 +240,13 @@ fn writeFileWithSkips(
         }
         if (ti == test_blocks.len) {
             while (si < skipl_index.items.len) : (si += 1) {
-                std.debug.print("skipl index: {d}, len skipl {d}, len index {d}\n", .{
-                    skipl_index.items[si],
-                    skipl_index.items.len,
-                    skiplist.items.len,
-                });
-                std.debug.print("range: {d}-{d}\n", .{ print_start, skiplist.items[skipl_index.items[si]].start });
+                // std.debug.print("skipl index: {d}, len skipl {d}, len index {d}\n", .{
+                //     skipl_index.items[si],
+                //     skipl_index.items.len,
+                //     skiplist.items.len,
+                // });
+                // std.debug.print("range: {d}-{d}\n", .{ print_start, skiplist.items[skipl_index.items[si]].start });
+                std.debug.print(">>>{s}<<<", .{parsed.source[print_start..skiplist.items[skipl_index.items[si]].start]});
                 try file.writeAll(parsed.source[print_start..skiplist.items[skipl_index.items[si]].start]);
                 print_start = skiplist.items[skipl_index.items[si]].end;
             }
@@ -257,12 +260,12 @@ fn writeFileWithSkips(
         // invariant: si < skipl_index.items.len and ti < test_blocks.len + all test_blocks used
         if (skiplist.items[skipl_index.items[si]].start < test_blocks[ti].start) {
             // test block decl and { should
-            std.debug.print("writing: >>>{s}<<<\n", .{parsed.source[print_start..skiplist.items[skipl_index.items[si]].start]});
+            std.debug.print(">>>{s}<<<", .{parsed.source[print_start..skiplist.items[skipl_index.items[si]].start]});
             try file.writeAll(parsed.source[print_start..skiplist.items[skipl_index.items[si]].start]);
             print_start = skiplist.items[skipl_index.items[si]].end;
             si += 1;
         } else {
-            std.debug.print("writing: >>>{s}<<<\n", .{parsed.source[print_start..skiplist.items[skipl_index.items[si]].start]});
+            std.debug.print(">>>{s}<<<", .{parsed.source[print_start..test_blocks[ti].end]});
             try file.writeAll(parsed.source[print_start..test_blocks[ti].end]);
             print_start = test_blocks[ti].end;
             while (skiplist.items[skipl_index.items[si]].start < print_start)
@@ -293,8 +296,8 @@ fn orderSkipIndex(context: void, lhs: usize, rhs: usize) std.math.Order {
 }
 
 /// Tries to reduce a given statement of the overall file by writing the code
+/// and returns, if successful.
 /// without the statement to a file, compile, run it and compare excpted behavior.
-/// Returns success status.
 /// On success, skiplist is appended and skipl_index updated.
 /// Caller must handle state change, if wanted.
 fn reduceStatement(
@@ -362,8 +365,10 @@ fn reduceStatement(
     defer alloc.free(res_run.stderr);
     std.log.debug("reduceStatement: 'zig test {s}' exit status: {d}", .{ filepath, res_run.term.Exited });
 
-    if (res_run.term.Exited == in_behave.exec_res.term.Exited)
+    if (res_run.term.Exited == in_behave.exec_res.term.Exited) {
+        std.log.debug("reduceStatement: successful reduction", .{});
         return true;
+    }
 
     // Restore skiplist and index.
     const popped = skiplist.pop();
@@ -377,6 +382,7 @@ fn reduceStatement(
     ).?;
     std.debug.assert(skipl_index.swapRemove(pos) == new_skipl_index);
     std.sort.sort(usize, skipl_index.items, skiplist, sortTokenIndices);
+    std.log.debug("reduceStatement: failed reduction", .{});
     return false;
 }
 
@@ -527,7 +533,7 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(!general_purpose_allocator.deinit());
     const gpa = general_purpose_allocator.allocator();
-    var state = State.init();
+    var state = State.init(); // state defines the last used filepath
 
     std.debug.assert(in_beh.fail == Fail.Run);
     {
@@ -560,146 +566,151 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
         try file.writeAll(formatted);
     }
 
-    {
-        // From here on analysis is slow (bottom up approach):
-        // Only removing top-decl, which is used to debug print, would
-        // require complex analysis, for which we are missing semantic
-        // information to not run into edge cases.
-        //
-        // Unused object analysis relies on compilation failure message:
-        // If `test --test-no-exec` returns "unused error", parse
-        // compilation error source locations to remove that object.
-        //
-        // Strategies:
-        // - Keep the file and only work with skiplist, because we identified
-        //   necessary runtime contexts
-        // - Reduce imports with _ (heavily used in tests)
-        // - Bottom-up approach
-        //   * From end to start of context:
-        //     if (!has_inner_statement)
-        //        removeCtx();
-        //     else
-        //        removeStmt();
-        //   * Start with end of test block; then traverse control flow
-
-        // TODO: Fixup for arbitrary test blocks
-        var filepathbuf: [FILEPATHBUF]u8 = undefined;
-        var filepath = try std.fmt.bufPrint(
-            filepathbuf[0..],
-            "{s}{d}{s}",
-            .{ config.out_path, state.out_nr, config.in_path },
-        );
-        var parsed = try openAndParseFile(gpa, filepath);
-        defer gpa.free(parsed.source);
-        defer parsed.tree.deinit(gpa);
-
-        var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer arena_instance.deinit();
-        const arena = arena_instance.allocator();
-        const cnt_roottest = countTestBlocks(&parsed);
-        const test_block_decls = try getTestBlockDecls(arena, &parsed, cnt_roottest);
-
-        // Inserting can be at arbitrary position, but we want not to iterate
-        // whole list: Keep a separate index into skiplist range.
-        // |      ▲ ▲  ▲    |
-        // |      │ └─┐└┐   |
-        //        0   2 1
-        // skiplist range insertion order: 0, 1, 2
-        // sorting index into skiplist:    0, 2, 1
-        var skiplist = try std.ArrayList(TokenRange).initCapacity(gpa, cnt_roottest);
-        defer skiplist.deinit();
-        var skipl_index = try std.ArrayList(usize).initCapacity(gpa, cnt_roottest);
-        defer skipl_index.deinit();
-
-        var testblk_ranges = try getTestBlockRanges(gpa, &parsed, cnt_roottest);
-        defer gpa.free(testblk_ranges);
-        std.debug.assert(testblk_ranges.len > 0); // at least 1 test block must be left
-        testblk_ranges[0].used = true;
-
-        // tests within tests are forbidden in Zig
-        for (test_block_decls) |test_blk_decl, tblk_i| {
-            testblk_ranges[tblk_i].used = true;
-            defer testblk_ranges[tblk_i].used = false;
-
-            const main_tokens = parsed.tree.nodes.items(.main_token);
-            const datas = parsed.tree.nodes.items(.data);
-            const node_tags = parsed.tree.nodes.items(.tag);
-            const node_index = datas[test_blk_decl].rhs;
-            std.log.debug("tag[{d}]: {}", .{ node_index, node_tags[node_index] });
-
-            // only handle statements for now
-            if (isBlock(parsed.tree, node_index)) {
-                var buffer: [2]std.zig.Ast.Node.Index = undefined;
-                var stmt_nodes = blockStatements(parsed.tree, node_index, &buffer).?;
-                var i: usize = stmt_nodes.len;
-                while (i > 0) {
-                    i -= 1;
-                    const stmt_node = stmt_nodes[i];
-                    const lbrace = main_tokens[stmt_node];
-                    const lbrace_srcloc = parsed.tree.tokenLocation(0, lbrace);
-                    const rbrace = parsed.tree.lastToken(stmt_node);
-                    const rbrace_srcloc = parsed.tree.tokenLocation(0, rbrace);
-                    const src_range = parsed.source[lbrace_srcloc.line_start..rbrace_srcloc.line_end];
-                    std.log.debug("try to remove remove stmt {d}: {s}", .{ i, src_range });
-                    {
-                        state.out_nr += 1; // update file number
-
-                        filepath = try std.fmt.bufPrint(
-                            filepathbuf[0..],
-                            "{s}{d}{s}",
-                            .{ config.out_path, state.out_nr, config.in_path },
-                        );
-                        // First check test block range and skip to necessary
-                        // TokenRanges to ignore other test blocks.
-                        // The reduction happens in a testblock, the other ones
-                        // must be skipped for analysis.
-                        // Note: Errors like unused vars now need a temporary fixup,
-                        // because they may be referenced by skipped test blocks
-                        //  test1       test2         test3
-                        // |    |      |    |        |  x |
-                        _ = try reduceStatement(
-                            gpa,
-                            filepath,
-                            &parsed,
-                            in_beh,
-                            &skiplist,
-                            &skipl_index,
-                            stmt_node,
-                            testblk_ranges,
-                        );
-                    }
-                }
-            }
-        } // end reduction inside test blocks
-
-        // if the reduction happens not in a testblock, (without semantic info)
-        // each test block must be analyzed individually to ensure
-        // 1. no unfixable compilation errors happen and
-        // 2. the error reproduces in each test block
-        // Note: Errors like unused vars now need a temporary fixup, because
-        // they may be referenced by (for now) removed test blocks
-        //  test1       test2         test3
-        // |    |      |    |     x  |    |
-
-        // TODO
-        // - resolve packages: Sema as it relies on comptime
-        //   Zir: import, c_import, no Zir: @This
-        // - index all symbols
-        // figure out how to store control flow
-        // TODO
-
-        // print result of reduction
-        state.out_nr += 1; // update file number
-        filepath = try std.fmt.bufPrint(
-            filepathbuf[0..],
-            "{s}{d}{s}",
-            .{ config.out_path, state.out_nr, config.in_path },
-        );
-        var file = try std.fs.cwd().createFile(filepath, .{});
-        defer file.close();
-        try writeFileWithSkips(file, &parsed, &skiplist, &skipl_index, testblk_ranges);
-        try stdout.writer().print("Result is in: ./{s}\n", .{filepath});
-    } // end of analysis
+    // {
+    //     // From here on analysis is slow (bottom up approach):
+    //     // Only removing top-decl, which is used to debug print, would
+    //     // require complex analysis, for which we are missing semantic
+    //     // information to not run into edge cases.
+    //     //
+    //     // Unused object analysis relies on compilation failure message:
+    //     // If `test --test-no-exec` returns "unused error", parse
+    //     // compilation error source locations to remove that object.
+    //     //
+    //     // Strategies:
+    //     // - Keep the file and only work with skiplist, because we identified
+    //     //   necessary runtime contexts
+    //     // - Reduce imports with _ (heavily used in tests)
+    //     // - Bottom-up approach
+    //     //   * From end to start of context:
+    //     //     if (!has_inner_statement)
+    //     //        removeCtx();
+    //     //     else
+    //     //        removeStmt();
+    //     //   * Start with end of test block; then traverse control flow
+    //
+    //     // TODO: Fixup for arbitrary test blocks
+    //     var filepathbuf: [FILEPATHBUF]u8 = undefined;
+    //     var filepath = try std.fmt.bufPrint(
+    //         filepathbuf[0..],
+    //         "{s}{d}{s}",
+    //         .{ config.out_path, state.out_nr, config.in_path },
+    //     );
+    //     var parsed = try openAndParseFile(gpa, filepath);
+    //     defer gpa.free(parsed.source);
+    //     defer parsed.tree.deinit(gpa);
+    //
+    //     var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    //     defer arena_instance.deinit();
+    //     const arena = arena_instance.allocator();
+    //     const cnt_roottest = countTestBlocks(&parsed);
+    //     const test_block_decls = try getTestBlockDecls(arena, &parsed, cnt_roottest);
+    //
+    //     // Inserting can be at arbitrary position, but we want not to iterate
+    //     // whole list: Keep a separate index into skiplist range.
+    //     // |      ▲ ▲  ▲    |
+    //     // |      │ └─┐└┐   |
+    //     //        0   2 1
+    //     // skiplist range insertion order: 0, 1, 2
+    //     // sorting index into skiplist:    0, 2, 1
+    //     var skiplist = try std.ArrayList(TokenRange).initCapacity(gpa, cnt_roottest);
+    //     defer skiplist.deinit();
+    //     var skipl_index = try std.ArrayList(usize).initCapacity(gpa, cnt_roottest);
+    //     defer skipl_index.deinit();
+    //
+    //     var testblk_ranges = try getTestBlockRanges(gpa, &parsed, cnt_roottest);
+    //     defer gpa.free(testblk_ranges);
+    //     std.debug.assert(testblk_ranges.len > 0); // at least 1 test block must be left
+    //     testblk_ranges[0].used = true;
+    //
+    //     // tests within tests are forbidden in Zig
+    //     for (test_block_decls) |test_blk_decl, tblk_i| {
+    //         testblk_ranges[tblk_i].used = true;
+    //         defer testblk_ranges[tblk_i].used = false;
+    //
+    //         const main_tokens = parsed.tree.nodes.items(.main_token);
+    //         const datas = parsed.tree.nodes.items(.data);
+    //         const node_tags = parsed.tree.nodes.items(.tag);
+    //         const node_index = datas[test_blk_decl].rhs;
+    //         std.log.debug("tag[{d}]: {}", .{ node_index, node_tags[node_index] });
+    //
+    //         // only handle statements for now
+    //         if (isBlock(parsed.tree, node_index)) {
+    //             var buffer: [2]std.zig.Ast.Node.Index = undefined;
+    //             var stmt_nodes = blockStatements(parsed.tree, node_index, &buffer).?;
+    //             var i: usize = stmt_nodes.len;
+    //             while (i > 0) {
+    //                 i -= 1;
+    //                 const stmt_node = stmt_nodes[i];
+    //                 const lbrace = main_tokens[stmt_node];
+    //                 const lbrace_srcloc = parsed.tree.tokenLocation(0, lbrace);
+    //                 const rbrace = parsed.tree.lastToken(stmt_node);
+    //                 const rbrace_srcloc = parsed.tree.tokenLocation(0, rbrace);
+    //                 const src_range = parsed.source[lbrace_srcloc.line_start..rbrace_srcloc.line_end];
+    //                 std.log.debug("try to remove remove stmt {d}: {s}", .{ i, src_range });
+    //                 {
+    //                     state.out_nr += 1; // update file number
+    //
+    //                     filepath = try std.fmt.bufPrint(
+    //                         filepathbuf[0..],
+    //                         "{s}{d}{s}",
+    //                         .{ config.out_path, state.out_nr, config.in_path },
+    //                     );
+    //                     // First check test block range and skip to necessary
+    //                     // TokenRanges to ignore other test blocks.
+    //                     // The reduction happens in a testblock, the other ones
+    //                     // must be skipped for analysis.
+    //                     // Note: Errors like unused vars now need a temporary fixup,
+    //                     // because they may be referenced by skipped test blocks
+    //                     //  test1       test2         test3
+    //                     // |    |      |    |        |  x |
+    //                     _ = try reduceStatement(
+    //                         gpa,
+    //                         filepath,
+    //                         &parsed,
+    //                         in_beh,
+    //                         &skiplist,
+    //                         &skipl_index,
+    //                         stmt_node,
+    //                         testblk_ranges,
+    //                     );
+    //                 }
+    //             }
+    //         }
+    //     } // end reduction inside test blocks
+    //     std.log.info("end reduction inside test blocks", .{});
+    //
+    //     {} // end reduction outside test blocks
+    //     std.log.info("end reduction outside test blocks", .{});
+    //
+    //     // if the reduction happens not in a testblock, (without semantic info)
+    //     // each test block must be analyzed individually to ensure
+    //     // 1. no unfixable compilation errors happen and
+    //     // 2. the error reproduces in each test block
+    //     // Note: Errors like unused vars now need a temporary fixup, because
+    //     // they may be referenced by (for now) removed test blocks
+    //     //  test1       test2         test3
+    //     // |    |      |    |     x  |    |
+    //
+    //     // TODO
+    //     // - resolve packages: Sema as it relies on comptime
+    //     //   Zir: import, c_import, no Zir: @This
+    //     // - index all symbols
+    //     // figure out how to store control flow
+    //     // TODO
+    //
+    //     // print result of reduction
+    //     state.out_nr += 1; // update file number
+    //     filepath = try std.fmt.bufPrint(
+    //         filepathbuf[0..],
+    //         "{s}{d}{s}",
+    //         .{ config.out_path, state.out_nr, config.in_path },
+    //     );
+    //     std.log.debug("write result into {s}", .{filepath});
+    //     var file = try std.fs.cwd().createFile(filepath, .{});
+    //     defer file.close();
+    //     try writeFileWithSkips(file, &parsed, &skiplist, &skipl_index, testblk_ranges);
+    //     try stdout.writer().print("Result is in: ./{s}\n", .{filepath});
+    // } // end of analysis
 }
 
 /// assume: distinct TokenRanges
