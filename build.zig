@@ -30,9 +30,10 @@ pub fn build(b: *std.build.Builder) void {
     run_step.dependOn(&run_cmd.step);
 
     // package approach to separate test runner from build system
-    const test_cases = b.addTest("src/test.zig");
+    var test_cases = b.addTest("src/test.zig");
     test_cases.setBuildMode(mode);
     test_cases.addPackagePath("test_cases", "test/cases.zig");
+    //TODO figure out how to set the envmap for RED_EXE
 
     // const test_cases_options = b.addOptions();
     // test_cases.addOptions("build_options", test_cases_options);

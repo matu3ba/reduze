@@ -22,9 +22,10 @@ pub const TestContext = struct {
     /// A `Case` consists of the test name, from which the start and end
     /// is being derived.
     pub const Case = struct {
-        /// Name of the test case. Used to identify the file before and after
-        /// reduction.
-        name: []const u8,
+        filepath_before: []const u8,
+        filepath_after: []const u8,
+
+        result: anyerror!void = {},
     };
 
     fn init(gpa: std.mem.Allocator, arena: std.mem.Allocator) TestContext {
@@ -41,23 +42,42 @@ pub const TestContext = struct {
 
     /// Run program and compare output of last reduction with expected output
     fn run(ctx: *TestContext) !void {
+        // var env_map = try std.process.getEnvMap(ctx.arena);
+        // try env_map.put("ZIG_EXE", self_exe_path);
+        const zig_exe_path = try std.process.getEnvVarOwned(ctx.arena, "ZIG_EXE");
+        // TODO get reduction executable path to call the respective command
+        const red_exe_path = try std.process.getEnvVarOwned(ctx.arena, "RED_EXE");
         var progress = std.Progress{};
         const root_node = progress.start("reduction", ctx.cases.items.len);
         defer root_node.end();
 
-        var beforepath_buf: [1000]u8 = undefined;
-        var afterpath_buf: [1000]u8 = undefined;
+        for (ctx.cases.items) |*case| {
+            var prg_node = root_node.start(case.filepath_before, 1);
+            prg_node.activate();
+            defer prg_node.end();
+            // TODO: figure out how to run things
+        }
 
-        _ = beforepath_buf;
-        _ = afterpath_buf;
-        std.debug.print("running {s}\n", .{ctx.cases.items[0].name});
+        var fail_count: usize = 0;
+        for (ctx.cases.items) |*case| {
+            case.result catch |err| {
+                fail_count += 1;
+                std.debu.print("{s} failed: {s}\n", .{ case.name, @errorName(err) });
+            };
+        }
 
-        // TODO finish up
-        // "test/initial_reduction/minimal_b.zig",
-        // "test/initial_reduction/minimal_a.zig",
+        if (fail_count != 0) {
+            std.debu.print("{d} tests failed\n", .{fail_count});
+            return error.TestFailed;
+        }
 
-        // parse results, then compare against expected
-
-        // add more examples
     }
+
+    // TODO ignore host system
+    // fn runOneCase() {
+    //         const result = try std.ChildProcess.exec(.{
+    //             .allocator = arena,
+    //             .argv = zig_args.items,
+    //         });
+    // }
 };

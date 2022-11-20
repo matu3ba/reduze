@@ -7,12 +7,13 @@ const builtin = @import("builtin");
 const TestContext = @import("../src/test.zig").TestContext;
 
 pub fn addCases(ctx: *TestContext) !void {
-    try addCase(ctx, "minimal");
+    try addCase(ctx, "./test/initial_reduction/minimal_b.zig", "./test/initial_reduction/minimal_a.zig");
 }
 
-pub fn addCase(ctx: *TestContext, name: []const u8) !void {
+pub fn addCase(ctx: *TestContext, fpath_before: []const u8, fpath_after: []const u8) !void {
     const case = TestContext.Case{
-        .name = name,
+        .filepath_before = fpath_before,
+        .filepath_after = fpath_after,
     };
     try ctx.cases.append(case);
 }
