@@ -103,7 +103,7 @@ fn openAndParseFile(alloc: std.mem.Allocator, in_file: []const u8) !Parsed {
         return error.EmptyFile;
     if (amt != stat.size)
         return error.UnexpectedEndOfFile;
-    var tree = try std.zig.parse(alloc, source);
+    var tree = try std.zig.Ast.parse(alloc, source, .zig);
     return Parsed{
         .source = source,
         .tree = tree,
@@ -332,7 +332,7 @@ fn testBlockReduction(
 
         var file = try std.fs.cwd().createFile(filepath, .{});
         defer file.close();
-        for (test_blocks) |token_range, i| {
+        for (test_blocks, 0..) |token_range, i| {
             if (i == state.out_nr) {
                 try file.writeAll(parsed.source[print_start..token_range.end]);
                 print_start = token_range.end;
@@ -454,7 +454,7 @@ fn mainLogic(config: *Config, in_beh: *InBehave) !void {
         var testred = try testBlockReduction(gpa, &parsed, config, in_beh, &state);
         defer gpa.free(testred);
 
-        var tree = std.zig.parse(gpa, testred) catch |err| {
+        var tree = std.zig.Ast.parse(gpa, testred, .zig) catch |err| {
             stdout.writer().print("--------INITIAL REDUCTION--------\n{s}---------------------------------\n", .{testred}) catch {};
             fatal("error parsing reduced test: {}", .{err});
         };
