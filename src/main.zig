@@ -46,11 +46,13 @@ pub fn main() !void {
         .fail = Fail.Compile,
         .exec_res = undefined,
     };
+    std.log.debug("in_path: {s}", .{config.in_path});
+    std.log.debug("out_path: {s}", .{config.out_path});
     // 1. capture output: Due to --test-no-exec we dont need seperation between
     // compiling and running. However, this may change on more complex build steps.
 
     // TODO fix https://github.com/ziglang/zig/issues/7441
-    // for not spamming the ramdisk with useless stuff
+    // for not spamming file system or ramdisk with useless stuff
     // related: How to compile from string without cache?
     const exp_res_comp = try std.ChildProcess.exec(.{
         .allocator = arena,
@@ -69,6 +71,10 @@ pub fn main() !void {
         .allocator = arena,
         .argv = &[_][]const u8{ "zig", "test", config.in_path },
     });
+    if (exp_res_run.term.Exited == 0) {
+        try stderr.writer().writeAll("found no compilation or runtime error, exiting search..\n");
+        std.process.exit(1);
+    }
 
     in_behave.fail = Fail.Run;
     in_behave.exec_res = exp_res_run;
@@ -90,7 +96,7 @@ const Parsed = struct {
 // caller owns memery of Ast
 fn openAndParseFile(alloc: std.mem.Allocator, in_file: []const u8) !Parsed {
     var f = std.fs.cwd().openFile(in_file, .{}) catch |err| {
-        fatal("unable to open file for zig-reduce '{s}': {s}", .{ in_file, @errorName(err) });
+        fatal("unable to open file for zig-reduce '{s}': {s}\n", .{ in_file, @errorName(err) });
     };
     defer f.close();
     const stat = try f.stat();

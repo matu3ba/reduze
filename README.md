@@ -2,22 +2,31 @@
 
 Current status: Vaporware.
 
-1. assume: Input file is valid Zig code
-2. test file input
-3. expected behavior = capture output of reference file
-4. Until Sema information is available, use a simple strategy.
-5. be conservative on deletions to always have valid Zig syntax
-6. parse compilation errors to simplify complexity, ie to detect unused vars
+1. Assume: Input file is valid Zig code.
+2. Test file input.
+3. Expected behavior = capture output of reference file.
+4. Until semantic information are available, use a simple strategy.
+5. Be conservative on deletions to always have valid Zig syntax.
+6. Parse compilation errors to simplify complexity, ie to detect unused vars.
+
+#### Usage
+
+```sh
+# unit tests (currently unused)
+zig build tunit
+# reduction tests
+zig build tred
+```
 
 ###### Using semantic info for reduction
 
 There is no official way to get Sema information out of the Zig compiler yet
-and partial usage of type info creates many ugly corner cases, so reduction 
+and partial usage of type info creates many ugly corner cases, so reduction
 is not type-based.
 
 ###### Packages
 
-Resolving import path from packages requires to "try out which comptime-path
+Resolving import path from packages requires to "try out which comptime path
 a symbol resolves to by removing stuff and looking if result is identical"
 or better a Zig interpreter like https://github.com/SuperAuguste/zint
 and query the output.
@@ -29,16 +38,16 @@ is unlikely in the near future.
 
 The ultimate goal is to rewrite the source code with semantic information.
 This would mean to utilize
-- 0. runtime trace (of used source locations) as preliminary step
-- 1. control flow graph
-- 2. symbol usage graph
-- 3. trace for each symbol
-- 4. source locations
-- 5. occurence of side-effects
+- 0. Runtime trace (of used source locations) as preliminary step
+- 1. Control flow graph
+- 2. Symbol usage graph
+- 3. Trace for each symbol
+- 4. Source locations
+- 5. Occurrence of side effects
      (everything, which indirectly calls stuff in `os` except for allocation)
-- 6. elimination strategy for side effects
+- 6. Elimination strategy for side effects
 
-It is unclear, what kind of representation is optimal as space-time tradeoff.
+It is unclear, what kind of representation is optimal as space-time trade-off.
 A custom RVSDG https://arxiv.org/abs/1912.05036 would contain all information.
 One inspiration for a tracing runner is rr https://github.com/rr-debugger/rr,
 but rr is not portable.
