@@ -1,6 +1,7 @@
 const std = @import("std");
 const cli_args = @import("cli_args.zig");
 const State = @import("State.zig");
+const UtilAst = @import("UtilAst.zig");
 
 const FILEPATHBUF = 100;
 
@@ -10,6 +11,16 @@ const stderr = std.io.getStdErr();
 pub const std_options = struct {
     pub const log_level = .debug;
 };
+
+pub const Parsed = struct {
+    source: [:0]u8,
+    tree: std.zig.Ast,
+};
+
+pub fn fatal(comptime format: []const u8, args: anytype) noreturn {
+    std.log.err(format, args);
+    std.process.exit(1);
+}
 
 pub fn main() !void {
     var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -30,8 +41,18 @@ pub fn main() !void {
     std.log.debug("cli_path: {s}", .{state.cli_path.?});
     std.log.debug("result_dir_path: {s}", .{state.result_dir_path.?});
 
-    // TODO handle absolute paths (ie /tmp/reduze)
-    state.result_dir = try std.fs.cwd().openDir(state.result_dir_path.?, .{});
+    if (std.fs.path.isAbsolute(state.result_dir_path.?)) {
+        state.result_dir = std.fs.openDirAbsolute(state.result_dir_path.?, .{}) catch |err| {
+            stderr.writer().writeAll("invalid result_dir path given\n") catch {};
+            return err;
+        };
+    } else {
+        // result_dir_path should be relative. Otherwise, error out.
+        state.result_dir = std.fs.cwd().openDir(state.result_dir_path.?, .{}) catch |err| {
+            stderr.writer().writeAll("invalid result_dir path given\n") catch {};
+            return err;
+        };
+    }
 
     // TODO fix https://github.com/ziglang/zig/issues/7441
     // for not spamming file system or ramdisk with useless stuff
@@ -41,41 +62,29 @@ pub fn main() !void {
         .argv = &[_][]const u8{ "zig", "test", "--test-no-exec", state.cli_path.? },
     });
     if (exp_res_comp.term.Exited != 0) {
+        //try std_out.writer().print("term : {}\nstdout: {s}\nstderr: {s}\n", .{ exp_res_comp.term, exp_res_comp.stdout, exp_res_comp.stderr });
         state.fail_t = .Compile;
         state.run_res = exp_res_comp;
 
         try std.fs.cwd().makePath(state.result_dir_path.?);
         try mainLogic(gpa, &state);
-        std.process.exit(0);
+    } else {
+        const exp_res_run = try std.ChildProcess.exec(.{
+            .allocator = arena,
+            .argv = &[_][]const u8{ "zig", "test", state.cli_path.? },
+        });
+        //try std_out.writer().print("term : {}\nstdout: {s}\nstderr: {s}\n", .{ exp_res_run.term, exp_res_run.stdout, exp_res_run.stderr });
+        if (exp_res_run.term.Exited == 0) {
+            return error.NoCompilationOrRuntimeError;
+        }
+
+        state.fail_t = .Run;
+        state.run_res = exp_res_run;
+
+        try std.fs.cwd().makePath(state.result_dir_path.?);
+        try mainLogic(gpa, &state);
     }
-
-    //try std_out.writer().print("term : {}\nstdout: {s}\nstderr: {s}\n", .{ exp_res.term, exp_res.stdout, exp_res.stderr });
-    const exp_res_run = try std.ChildProcess.exec(.{
-        .allocator = arena,
-        .argv = &[_][]const u8{ "zig", "test", state.cli_path.? },
-    });
-    if (exp_res_run.term.Exited == 0) {
-        try stderr.writer().writeAll("found no compilation or runtime error, exiting search..\n");
-        std.process.exit(1);
-    }
-
-    state.fail_t = .Run;
-    state.run_res = exp_res_run;
-
-    try std.fs.cwd().makePath(state.result_dir_path.?);
-    try mainLogic(gpa, &state);
-    std.process.exit(0);
 }
-
-pub fn fatal(comptime format: []const u8, args: anytype) noreturn {
-    std.log.err(format, args);
-    std.process.exit(1);
-}
-
-const Parsed = struct {
-    source: [:0]u8,
-    tree: std.zig.Ast,
-};
 
 // caller owns memery of Ast
 fn openAndParseFile(alloc: std.mem.Allocator, in_file: []const u8) !Parsed {
@@ -105,23 +114,6 @@ const TokenRange = struct {
     end: usize,
     used: bool,
 };
-
-fn countTestBlocks(parsed: *Parsed) u32 {
-    // TODO: fixup for arbitrary nested test blocks, not only top level ones
-    const members = parsed.tree.rootDecls(); // Ast.Node.Index
-    std.debug.assert(members.len > 0);
-    var cnt_roottest: u32 = 0;
-    for (members) |member| {
-        const decl = member;
-        switch (parsed.tree.nodes.items(.tag)[decl]) {
-            .test_decl => {
-                cnt_roottest += 1;
-            },
-            else => {},
-        }
-    }
-    return cnt_roottest;
-}
 
 /// Must be called with cnt_roottest generated from countTestBlocks
 /// Caller owns memory.
@@ -301,7 +293,7 @@ fn testblockReduction(
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
 
-    const cnt_testblocks = countTestBlocks(parsed);
+    const cnt_testblocks = UtilAst.countTestBlocks(parsed);
     const test_blocks = try getTestBlockRanges(arena, parsed, cnt_testblocks);
 
     // write file to path with only the investigated token_range (without other
@@ -466,7 +458,7 @@ pub fn initialReduction(gpa: std.mem.Allocator, state: *State) !void {
         "{d}{s}",
         .{ @intCast(u32, state.filepaths.items.len), state.cli_path.? },
     );
-    var file = try state.result_dir.createFile(filename, .{});
+    var file = try state.result_dir.?.createFile(filename, .{});
     defer file.close();
     try file.writeAll(formatted);
 }

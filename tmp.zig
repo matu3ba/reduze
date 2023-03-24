@@ -12,6 +12,11 @@ test "failure1" {
 
 test "failure2" {
     std.debug.print("helpme1\n", .{});
+    std.debug.assert(true);
+}
+
+test "failure2" {
+    std.debug.print("helpme1\n", .{});
     std.debug.assert(false);
 }
 fn failure4() void {}
