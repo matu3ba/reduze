@@ -5,8 +5,8 @@ const UtilAst = @import("UtilAst.zig");
 
 const FILEPATHBUF = 100;
 
-const stdout = std.io.getStdOut();
-const stderr = std.io.getStdErr();
+pub const stdout = std.io.getStdOut();
+pub const stderr = std.io.getStdErr();
 
 pub const std_options = struct {
     pub const log_level = .debug;
@@ -109,69 +109,11 @@ fn openAndParseFile(alloc: std.mem.Allocator, in_file: []const u8) !Parsed {
     };
 }
 
-const TokenRange = struct {
+pub const TokenRange = struct {
     start: usize,
     end: usize,
     used: bool,
 };
-
-/// Must be called with cnt_roottest generated from countTestBlocks
-/// Caller owns memory.
-fn getTestBlockDecls(alloc: std.mem.Allocator, parsed: *Parsed, cnt_roottest: u32) ![]std.zig.Ast.TokenIndex {
-    var decls = try std.ArrayList(std.zig.Ast.TokenIndex).initCapacity(alloc, cnt_roottest);
-    defer decls.deinit();
-    const members = parsed.tree.rootDecls(); // Ast.Node.Index
-    for (members) |member| {
-        const decl = member;
-        switch (parsed.tree.nodes.items(.tag)[decl]) {
-            .test_decl => {
-                decls.appendAssumeCapacity(decl);
-            },
-            else => {},
-        }
-    }
-    std.debug.assert(cnt_roottest == decls.items.len);
-    return decls.toOwnedSlice();
-}
-
-/// Must be called with cnt_roottest generated from countTestBlocks
-/// Caller owns memory.
-fn getTestBlockRanges(alloc: std.mem.Allocator, parsed: *Parsed, cnt_roottest: u32) ![]TokenRange {
-    // TODO: fixup for arbitrary test blocks
-    var test_blocks = try std.ArrayList(TokenRange).initCapacity(alloc, cnt_roottest);
-    defer test_blocks.deinit();
-    const members = parsed.tree.rootDecls(); // Ast.Node.Index
-    for (members) |member| {
-        const main_tokens = parsed.tree.nodes.items(.main_token);
-        const datas = parsed.tree.nodes.items(.data);
-        const node_tags = parsed.tree.nodes.items(.tag);
-        const decl = member;
-        switch (node_tags[decl]) {
-            .test_decl => {
-                const node = datas[decl].rhs; // std.Ast.Node.Index
-                std.debug.assert(isBlock(parsed.tree, node));
-                // std.debug.assert(node_tags[node] == .block_two_semicolon);
-                const block_node = node;
-                const lbrace = main_tokens[block_node];
-                const lbrace_srcloc = parsed.tree.tokenLocation(0, lbrace);
-                const rbrace = parsed.tree.lastToken(block_node);
-                const rbrace_srcloc = parsed.tree.tokenLocation(0, rbrace);
-
-                test_blocks.appendAssumeCapacity(TokenRange{
-                    .start = lbrace_srcloc.line_start,
-                    .end = rbrace_srcloc.line_end,
-                    .used = false,
-                });
-
-                // try stdout.writeAll(parsed.source[lbrace_srcloc.line_start..rbrace_srcloc.line_end]);
-                // try stdout.writer().writeAll("\n");
-            },
-            else => {},
-        }
-    }
-    std.debug.assert(cnt_roottest == test_blocks.items.len);
-    return test_blocks.toOwnedSlice();
-}
 
 /// assume: file is opened and valid file descriptor
 /// assume: skip list contains only unused token_ranges
@@ -293,8 +235,9 @@ fn testblockReduction(
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
 
-    const cnt_testblocks = UtilAst.countTestBlocks(parsed);
-    const test_blocks = try getTestBlockRanges(arena, parsed, cnt_testblocks);
+    const cnt_testblocks = try UtilAst.countTestBlocks(parsed);
+    std.debug.print("cnt_testblocks: {d}\n", .{cnt_testblocks});
+    const test_blocks = try UtilAst.getTestBlockRanges(arena, parsed, cnt_testblocks);
 
     // write file to path with only the investigated token_range (without other
     // test blocks) and rest of file
@@ -396,17 +339,6 @@ fn testblockReduction(
     return redtest;
 }
 
-fn isBlock(tree: std.zig.Ast, node: std.zig.Ast.Node.Index) bool {
-    return switch (tree.nodes.items(.tag)[node]) {
-        .block_two,
-        .block_two_semicolon,
-        .block,
-        .block_semicolon,
-        => true,
-        else => false,
-    };
-}
-
 /// returns a list of statements
 pub fn blockStatements(
     tree: std.zig.Ast,
@@ -433,6 +365,7 @@ pub fn blockStatements(
     };
 }
 
+// TODO enumerate possible steps
 pub fn initialReduction(gpa: std.mem.Allocator, state: *State) !void {
     // reduce root test decls, which should always succeed
     var parsed = try openAndParseFile(gpa, state.cli_path.?);
@@ -461,6 +394,7 @@ pub fn initialReduction(gpa: std.mem.Allocator, state: *State) !void {
     var file = try state.result_dir.?.createFile(filename, .{});
     defer file.close();
     try file.writeAll(formatted);
+    try state.filepaths.append(filename[0..]);
 }
 
 pub fn mainLogic(gpa: std.mem.Allocator, state: *State) !void {

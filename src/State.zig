@@ -32,7 +32,7 @@ pub const StackEntry = struct {
 };
 
 /// append-only list of filepaths
-filepaths: std.ArrayList([]const u8),
+filepaths: std.ArrayList([]u8),
 /// append-only reduction history (successes and failures on reduction)
 history: std.ArrayList(RangeEntry),
 /// indexes into history with reduce_ok=true (if not exist reduce_ok=null) sorted by skip_begin
@@ -65,7 +65,7 @@ run_res: std.ChildProcess.ExecResult,
 
 pub fn init(alloc: std.mem.Allocator) State {
     return .{
-        .filepaths = std.ArrayList([]const u8).init(alloc),
+        .filepaths = std.ArrayList([]u8).init(alloc),
         .history = std.ArrayList(RangeEntry).init(alloc),
         .sorted_skips = std.ArrayList(u32).init(alloc),
         .step_stack = std.ArrayList(StackEntry).init(alloc),
